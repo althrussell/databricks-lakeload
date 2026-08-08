@@ -9,7 +9,7 @@ LakeLoad is a repeatable Databricks App for demonstrating Lakebase OLTP, DBSQL O
 - One serverless Lakeflow Job runner for distributed Lakebase load.
 - One DBSQL warehouse binding for Delta setup and OLAP scenarios.
 - One executable DBSQL-versus-Lakebase notebook job.
-- A copy-on-write Branch Lab for live snapshots and isolated restore branches.
+- A copy-on-write Branch Lab for live demo branches, snapshots, isolated restores, and branch inspection switching.
 - PostgreSQL tables in `lakeload_bench`: `account` (1 million rows), `product` (10,000 rows), and `history` (5 million rows).
 - Delta tables in `<catalog>.lakeload`: `account` (1 million rows), `product` (10,000 rows), and `history` (5 million rows).
 
@@ -60,7 +60,7 @@ Hard Reset permanently removes only LakeLoad-owned test artifacts:
 - every row in the dedicated `lakeload_bench` PostgreSQL tables;
 - the three `lakeload_*` Delta benchmark tables in the selected catalog and schema;
 - all run manifests, one-second metrics, and branch-operation history;
-- branches whose IDs match `snapshot-*` or `restore-*`, purged child restores before snapshots.
+- branches whose IDs match `demo-*`, `snapshot-*`, or `restore-*`, purged child restores before their parents.
 
 It preserves the selected catalog and schema, every non-LakeLoad table, the Lakebase project, `production` and `benchmark` branches, database and compute resources, App deployment, and selected SQL warehouse. Active loads and branch operations must finish or be stopped first. When the status reads **Ready for a clean start**, select **Prepare benchmark data** before launching another test.
 
@@ -273,32 +273,33 @@ Every graph is driven by the same approximately one-second stream. Each sample r
 
 Hover any graph to inspect an exact one-second sample. The crosshair readout shows the sample time, each series value, and its percentage change from the previous sample. Keyboard users can focus a graph, move through samples with Left/Right Arrow, and press Escape to close the readout.
 
-| Metric                            | Meaning                                                                                                                                                |
-| --------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| Completed ops/s                   | Successful completions normalized by actual sample width.                                                                                              |
-| Offered ops/s                     | Arrivals attempted by target-rate scheduling, normalized by actual sample width.                                                                        |
-| Admission drops                   | Arrivals not started because the configured in-flight client limit was full.                                                                            |
-| Query errors                      | Admitted operations that returned an engine error.                                                                                                      |
-| Database tx/s                     | PostgreSQL commits plus rollbacks normalized by database-stat sample width. It is endpoint context, not an exact workload counter.                      |
-| p50 / p95 / p99                   | Exact nearest-rank latency of successful operations as observed by the load generator.                                                                  |
-| Active / idle / total connections | Current PostgreSQL sessions for the benchmark database.                                                                                                |
-| Inserted / updated / deleted      | PostgreSQL row-change counters sampled as interval deltas.                                                                                             |
-| Cache hit                         | Current PostgreSQL block cache hit ratio.                                                                                                              |
-| Waiting locks                     | Locks not granted at sample time; use this beside p99 to identify contention.                                                                          |
+| Metric                            | Meaning                                                                                                                            |
+| --------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------- |
+| Completed ops/s                   | Successful completions normalized by actual sample width.                                                                          |
+| Offered ops/s                     | Arrivals attempted by target-rate scheduling, normalized by actual sample width.                                                   |
+| Admission drops                   | Arrivals not started because the configured in-flight client limit was full.                                                       |
+| Query errors                      | Admitted operations that returned an engine error.                                                                                 |
+| Database tx/s                     | PostgreSQL commits plus rollbacks normalized by database-stat sample width. It is endpoint context, not an exact workload counter. |
+| p50 / p95 / p99                   | Exact nearest-rank latency of successful operations as observed by the load generator.                                             |
+| Active / idle / total connections | Current PostgreSQL sessions for the benchmark database.                                                                            |
+| Inserted / updated / deleted      | PostgreSQL row-change counters sampled as interval deltas.                                                                         |
+| Cache hit                         | Current PostgreSQL block cache hit ratio.                                                                                          |
+| Waiting locks                     | Locks not granted at sample time; use this beside p99 to identify contention.                                                      |
 
 The charts show `1s LIVE` only while a run is active. Completed runs are explicitly labelled `RECORDED`. Lakebase-only database statistics should not be interpreted as DBSQL engine telemetry during a DBSQL run.
 
-## Demonstrate snapshot and restore under load
+## Demonstrate branch creation, switching, snapshot, and restore under load
 
 1. Start **Mixed application traffic** for 60 seconds or longer.
-2. Open **Branch lab** while the TPS and latency charts are moving. Navigation does not stop the run.
-3. Select **Capture snapshot**. The operation stream and lineage poll every second while workload graphs continue updating.
-4. Select the completed `snapshot-*` node.
-5. Select **Restore isolated branch**. LakeLoad creates a `restore-*` branch and verifies its dedicated read-write compute. If the platform does not clone an endpoint with the branch, LakeLoad creates a 0.5–1 CU endpoint.
-6. Use the live graphs to show that benchmark traffic continued throughout both operations.
-7. Remove a disposable `restore-*` branch from its trash action when finished.
+2. Select **Open Branch Lab** beside **Stop load** while the TPS and latency charts are moving. Opening Branch Lab does not stop the run.
+3. Select **Create live branch**. LakeLoad creates a `demo-*` copy-on-write branch from `benchmark` and provisions dedicated 0.5–1 CU read-write compute.
+4. Use **Switch branch view** or click topology nodes to switch between `benchmark`, the new `demo-*` branch, production, snapshots, and restores. The selected-branch panel updates source, state, logical size, and creation time.
+5. Confirm **Workload branch** still shows `benchmark · load active` while the selected branch shows the isolated copy. Switching the inspected branch does not move existing PostgreSQL sessions.
+6. Select **Capture snapshot**, choose the completed `snapshot-*` node, then select **Restore isolated branch**. LakeLoad creates a `restore-*` branch and verifies dedicated read-write compute.
+7. Use the live graphs to show that benchmark traffic continued throughout branch, snapshot, and restore operations.
+8. Remove disposable `demo-*` and `restore-*` branches from their trash actions when finished.
 
-LakeLoad never resets or overwrites `benchmark`. Restore means “create a new isolated branch from this snapshot.” The App only allows deletion of branches it recognizes by the `snapshot-*` or `restore-*` prefix; the UI exposes deletion only for disposable restore branches.
+LakeLoad never resets or overwrites `benchmark`. An active workload remains bound to the connections it opened on `benchmark`; **Switch branch view** changes the Branch Lab view, not those connections. Hard Reset and manual removal are limited to branches recognized by the `demo-*`, `snapshot-*`, or `restore-*` prefix.
 
 Recommended demo sequence:
 

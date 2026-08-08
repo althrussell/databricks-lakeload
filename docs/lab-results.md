@@ -15,14 +15,14 @@ Conditions:
 
 These runs use exact successful-request percentiles, a deterministic seed, three seconds of excluded pre-measure traffic, matched 1M/10K/5M cardinalities, and actual-width rate buckets.
 
-| Workload | Engine | Clients / model | Measured operations | Approx. ops/s | p50 | p95 | p99 | Errors |
-|---|---|---:|---:|---:|---:|---:|---:|---:|
-| Matched indexed account/product lookup | Lakebase | 10 closed | 37,248 | 3,724.8 | 2.34 ms | 4.77 ms | 7.49 ms | 0 |
-| Matched indexed account/product lookup | DBSQL | 10 closed | 123 | 12.3 | 703.92 ms | 1,678.61 ms | 1,835.67 ms | 0 |
-| Matched 5M scan and two-dimension join | Lakebase | 1 closed | 1 | 0.1 | 17,551.52 ms | 17,551.52 ms | 17,551.52 ms | 0 |
-| Matched 5M scan and two-dimension join | DBSQL | 1 closed | 22 | 2.2 | 465.84 ms | 517.83 ms | 600.40 ms | 0 |
-| Mixed OLTP traffic | Lakebase | 24 closed | 22,416 | 2,241.6 | 4.19 ms | 31.68 ms | 41.67 ms | 0 |
-| Indexed lookup saturation | Lakebase | 3,000 target / 5 in-flight | 11,810 | 1,181.0 | 3.68 ms | 4.99 ms | 7.68 ms | 18,188 admission drops |
+| Workload                               | Engine   |            Clients / model | Measured operations | Approx. ops/s |          p50 |          p95 |          p99 |                 Errors |
+| -------------------------------------- | -------- | -------------------------: | ------------------: | ------------: | -----------: | -----------: | -----------: | ---------------------: |
+| Matched indexed account/product lookup | Lakebase |                  10 closed |              37,248 |       3,724.8 |      2.34 ms |      4.77 ms |      7.49 ms |                      0 |
+| Matched indexed account/product lookup | DBSQL    |                  10 closed |                 123 |          12.3 |    703.92 ms |  1,678.61 ms |  1,835.67 ms |                      0 |
+| Matched 5M scan and two-dimension join | Lakebase |                   1 closed |                   1 |           0.1 | 17,551.52 ms | 17,551.52 ms | 17,551.52 ms |                      0 |
+| Matched 5M scan and two-dimension join | DBSQL    |                   1 closed |                  22 |           2.2 |    465.84 ms |    517.83 ms |    600.40 ms |                      0 |
+| Mixed OLTP traffic                     | Lakebase |                  24 closed |              22,416 |       2,241.6 |      4.19 ms |     31.68 ms |     41.67 ms |                      0 |
+| Indexed lookup saturation              | Lakebase | 3,000 target / 5 in-flight |              11,810 |       1,181.0 |      3.68 ms |      4.99 ms |      7.68 ms | 18,188 admission drops |
 
 The saturation run is intentionally overloaded: completed throughput averaged about 1,181 ops/s while offered demand remained near 3,000 ops/s. All failures were load-generator admission drops and no admitted database query failed. This is the behavior the new bottleneck panel is designed to explain.
 
@@ -73,7 +73,7 @@ The open-loop smoke reached 99.96% of the requested 500 operations per second wi
 - Comparison notebook job run `229094537513833`: succeeded with the matched v3 1M/10K lookup and 5M scan definitions.
 - Remote Playwright smoke: passed in Chromium.
 - Full hosted acceptance on the deployed App: 13 of 14 tests passed on the first exhaustive run; the remaining case exposed a 16 px readiness-badge overflow at 375 px. After the responsive-grid fix was deployed, all three targeted 375 px regression checks passed.
-- Guarded Hard Reset acceptance: completed in approximately four seconds, removed 29 stored runs and their metrics, emptied all Lakebase benchmark tables, and purged two `snapshot-*`/`restore-*` branches. It preserved `production`, `benchmark`, the App deployment, and the selected `cost-wh` warehouse. Reset now removes only the three `lakeload_*` tables from the selected Unity Catalog schema, preserving every other object. A subsequent **Prepare benchmark data** restored the deterministic 5,000,000-row lab dataset.
+- Guarded Hard Reset acceptance: completed in approximately four seconds, removed 29 stored runs and their metrics, emptied all Lakebase benchmark tables, and purged two `snapshot-*`/`restore-*` branches. It preserved `production`, `benchmark`, the App deployment, and the selected `cost-wh` warehouse. Reset removes only the four LakeLoad Delta tables from the selected Unity Catalog schema, preserving every other object. A subsequent **Prepare benchmark data** restored the deterministic 5,000,000-row lab dataset. Current reset scope also includes disposable `demo-*` branches.
 - Side-by-side OLTP and OLAP acceptance: both engine lanes completed, result scorecards populated, and all comparison charts exposed pointer inspection.
 - Warehouse Settings acceptance: the App listed both accessible `labs` warehouses, switched from `cost-wh` to `Serverless Starter Warehouse`, connection-tested it, completed a DBSQL point-lookup run with the selected warehouse stamped in the run manifest, and restored the baseline selection.
 - Responsive check: no document-level horizontal overflow at 1,440 px or 375 px.
@@ -87,6 +87,7 @@ Validated against deployment `lakeload` on 2026-08-08:
 - Observed workload throughput during the run was approximately 560–1,100 operations/second. PostgreSQL telemetry simultaneously reported 25–32 total connections, 99.98–99.99% cache hit, database size, transaction deltas, row churn, and lock state.
 - All seven Live Console SVG charts changed after successive samples: throughput/demand, latency, connections, row churn, operation mix, database health, and saturation signals.
 - Both Branch Lab charts changed after successive samples while the branch operation stream and topology were also polling every second.
+- On 2026-08-09, the hosted Branch Lab acceptance started load, opened Branch Lab from the running-workload action, created a `demo-*` branch from `benchmark`, provisioned dedicated read-write compute, selected the new branch automatically, and switched the branch view while the active workload remained on `benchmark`. Cleanup removed the disposable branch and left `production` and `benchmark` intact.
 - Copy-on-write snapshot `snapshot-live-0808055022` reached `READY` while load remained active.
 - Restore `restore-live-0808055022` reached `READY` from that snapshot with its dedicated `primary` read-write compute `ACTIVE`.
 - The benchmark workload continued to sample throughout branch creation. Restore never reset or replaced `benchmark`.
@@ -98,14 +99,14 @@ These are functional acceptance observations, not benchmark claims. Snapshot and
 
 All five workspace preview toggles were confirmed **On** on 2026-08-08. Readiness below comes from the deployed App's live project, PostgreSQL, and Delta probes; a workspace toggle alone is not treated as proof that a feature is configured.
 
-| Capability | State | Evidence |
-|---|---|---|
-| Lakebase CDF | Project action required | `REPLICA IDENTITY FULL` is configured for the benchmark tables. CDF still must be started on branch `benchmark` for `databricks_postgres.lakeload_bench` into `main.lakeload`; `main.lakeload.lb_orders_history` is not yet queryable. |
-| Synced tables | Ready and tested | Continuous resource `synced_tables/lakeload_pg.lakeload_sync.serving_profile` is online and queryable as `lakeload_sync.serving_profile`. Run `144effeb-376e-4a67-b3bd-61d99f770c2a` completed two cycles with zero errors: 8.07 s and 8.21 s Delta-to-Lakebase freshness (p95 8.2146 s). |
-| Lakebase Search | Project action required | Packages are available, but extension creation returns `lakebase_vector must be loaded via shared_preload_libraries`. Enable Search once in `projects/lakeload` settings; this irreversibly enables the project feature and restarts every project compute. |
-| Local query statistics | Ready | `pg_stat_statements` is installed and available to LakeLoad immediately. |
-| Advanced Postgres telemetry | Configuration required | No Observability export is assigned to `projects/lakeload`; `pg_stat_statements_counters`, `active_session_history`, and `plan_history` are not yet queryable in `main.lakeload`. |
-| OpenTelemetry | External dependency required | The workspace preview is enabled, but no reachable external OTLP endpoint and credentials are configured. LakeLoad does not fabricate or provision this customer-owned destination. |
+| Capability                  | State                        | Evidence                                                                                                                                                                                                                                                                                  |
+| --------------------------- | ---------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Lakebase CDF                | Project action required      | `REPLICA IDENTITY FULL` is configured for the benchmark tables. CDF still must be started on branch `benchmark` for `databricks_postgres.lakeload_bench` into `main.lakeload`; `main.lakeload.lb_orders_history` is not yet queryable.                                                    |
+| Synced tables               | Ready and tested             | Continuous resource `synced_tables/lakeload_pg.lakeload_sync.serving_profile` is online and queryable as `lakeload_sync.serving_profile`. Run `144effeb-376e-4a67-b3bd-61d99f770c2a` completed two cycles with zero errors: 8.07 s and 8.21 s Delta-to-Lakebase freshness (p95 8.2146 s). |
+| Lakebase Search             | Project action required      | Packages are available, but extension creation returns `lakebase_vector must be loaded via shared_preload_libraries`. Enable Search once in `projects/lakeload` settings; this irreversibly enables the project feature and restarts every project compute.                               |
+| Local query statistics      | Ready                        | `pg_stat_statements` is installed and available to LakeLoad immediately.                                                                                                                                                                                                                  |
+| Advanced Postgres telemetry | Configuration required       | No Observability export is assigned to `projects/lakeload`; `pg_stat_statements_counters`, `active_session_history`, and `plan_history` are not yet queryable in `main.lakeload`.                                                                                                         |
+| OpenTelemetry               | External dependency required | The workspace preview is enabled, but no reachable external OTLP endpoint and credentials are configured. LakeLoad does not fabricate or provision this customer-owned destination.                                                                                                       |
 
 Keyword, vector, hybrid RRF, CDF semantics, closed-loop LTAP, advanced diagnosis, and OTLP-correlation scenarios remain visible but cannot be launched until their live prerequisites pass. This prevents a preview toggle from being misrepresented as a successful feature test.
 

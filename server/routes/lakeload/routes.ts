@@ -52,7 +52,7 @@ const RunRequest = z.object({
 });
 
 const BranchRequest = z.object({
-  kind: z.enum(['snapshot', 'restore']),
+  kind: z.enum(['branch', 'snapshot', 'restore']),
   sourceBranch: z.string().regex(/^projects\/[a-z0-9-]+\/branches\/[a-z0-9-]+$/),
   branchId: z.string().regex(/^[a-z][a-z0-9-]{0,62}$/),
   createCompute: z.boolean().default(false),
@@ -377,7 +377,7 @@ export async function setupLakeLoadRoutes(appkit: AppKitServices) {
       await appkit.lakebase.query(
         `UPDATE lakeload_control.reset_operation SET branch_count=$2,
          message=$3 WHERE id=$1`,
-        [resetId, branches.length, `Purging ${branches.length} LakeLoad snapshot and restore branches`]
+        [resetId, branches.length, `Purging ${branches.length} LakeLoad demo, snapshot, and restore branches`]
       );
       await purgeLakeLoadTestBranches(workspaceClient, projectName, branches, async (message) => {
         await appkit.lakebase.query('UPDATE lakeload_control.reset_operation SET message=$2 WHERE id=$1', [
@@ -418,7 +418,7 @@ export async function setupLakeLoadRoutes(appkit: AppKitServices) {
   }
 
   const pendingOperations = await appkit.lakebase.query(
-    `SELECT id, operation_name, phase, branch_name, create_compute FROM lakeload_control.branch_operation
+    `SELECT id, kind, operation_name, phase, branch_name, create_compute FROM lakeload_control.branch_operation
      WHERE status IN ('queued','running') AND operation_name IS NOT NULL`
   );
   await appkit.lakebase.query(
@@ -677,7 +677,7 @@ export async function setupLakeLoadRoutes(appkit: AppKitServices) {
       const input = parsed.data;
       if (!input.sourceBranch.startsWith(`${projectName}/branches/`))
         return void res.status(400).json({ error: 'Source branch must belong to the LakeLoad project' });
-      const requiredPrefix = input.kind === 'snapshot' ? 'snapshot-' : 'restore-';
+      const requiredPrefix = input.kind === 'branch' ? 'demo-' : input.kind === 'snapshot' ? 'snapshot-' : 'restore-';
       if (!input.branchId.startsWith(requiredPrefix))
         return void res.status(400).json({ error: `${input.kind} branch IDs must start with ${requiredPrefix}` });
       let operationId: string | null = null;
@@ -714,7 +714,11 @@ export async function setupLakeLoadRoutes(appkit: AppKitServices) {
           [
             operationId,
             operationName,
-            input.kind === 'snapshot' ? 'Capturing copy-on-write snapshot' : 'Restoring into an isolated branch',
+            input.kind === 'branch'
+              ? 'Creating copy-on-write demo branch while benchmark load continues'
+              : input.kind === 'snapshot'
+                ? 'Capturing copy-on-write snapshot'
+                : 'Restoring into an isolated branch',
           ]
         );
         void monitorBranchOperation(appkit.lakebase, workspaceClient, {
@@ -723,6 +727,7 @@ export async function setupLakeLoadRoutes(appkit: AppKitServices) {
           phase: 'branch',
           branch_name: branchName,
           create_compute: input.createCompute,
+          kind: input.kind,
         }).catch((error) => failBranchOperation(appkit.lakebase, operationId ?? '', error));
         res.status(202).json({ operationId, branchName });
       } catch (error) {
@@ -739,8 +744,10 @@ export async function setupLakeLoadRoutes(appkit: AppKitServices) {
     app.delete('/api/lakeload/branches/:branchId', async (req, res) => {
       if (resetBusy()) return void res.status(409).json({ error: 'Hard reset is in progress' });
       const branchId = req.params.branchId;
-      if (!/^(snapshot|restore)-[a-z0-9-]+$/.test(branchId))
-        return void res.status(400).json({ error: 'Only LakeLoad snapshot and restore branches can be removed here' });
+      if (!/^(demo|snapshot|restore)-[a-z0-9-]+$/.test(branchId))
+        return void res
+          .status(400)
+          .json({ error: 'Only LakeLoad demo, snapshot, and restore branches can be removed here' });
       try {
         const operation = await postgresRequest(
           workspaceClient,
@@ -873,11 +880,12 @@ export async function setupLakeLoadRoutes(appkit: AppKitServices) {
           ]
         );
         const runId = String(created.rows[0].id);
-        const task = definition.engine === 'dbsql'
-          ? dbsqlEngine.start(runId, config as DbsqlRunConfig)
-          : LTAP_SCENARIOS.has(definition.id)
-            ? ltapEngine.start(runId, config as LtapRunConfig)
-            : lakebaseEngine.start(runId, config as RunConfig);
+        const task =
+          definition.engine === 'dbsql'
+            ? dbsqlEngine.start(runId, config as DbsqlRunConfig)
+            : LTAP_SCENARIOS.has(definition.id)
+              ? ltapEngine.start(runId, config as LtapRunConfig)
+              : lakebaseEngine.start(runId, config as RunConfig);
         void task.catch((error) => console.error(`[lakeload] run ${runId} failed`, error));
         res.status(202).json({ runId });
       } catch (error) {
@@ -886,7 +894,11 @@ export async function setupLakeLoadRoutes(appkit: AppKitServices) {
     });
 
     app.delete('/api/lakeload/runs/:id', (req, res) => {
-      if (!lakebaseEngine.cancel(req.params.id) && !dbsqlEngine.cancel(req.params.id) && !ltapEngine.cancel(req.params.id))
+      if (
+        !lakebaseEngine.cancel(req.params.id) &&
+        !dbsqlEngine.cancel(req.params.id) &&
+        !ltapEngine.cancel(req.params.id)
+      )
         return void res.status(404).json({ error: 'Active run not found' });
       res.status(202).json({ status: 'cancelling' });
     });
@@ -939,11 +951,7 @@ async function ensureSyncedServingTable(
   const syncedId = `${lakebaseCatalogId}.lakeload_sync.serving_profile`;
   let existing: unknown = null;
   try {
-    existing = await postgresRequest(
-      workspaceClient,
-      `/api/2.0/postgres/synced_tables/${syncedId}`,
-      'GET'
-    );
+    existing = await postgresRequest(workspaceClient, `/api/2.0/postgres/synced_tables/${syncedId}`, 'GET');
   } catch {
     // Not found is the expected first-install path.
   }
@@ -956,11 +964,7 @@ async function ensureSyncedServingTable(
         ? 'Continuous synced serving table is online'
         : `Continuous synced serving table is provisioning (${detailedState || 'pending'})`;
     }
-    const removed = await postgresRequest(
-      workspaceClient,
-      `/api/2.0/postgres/synced_tables/${syncedId}`,
-      'DELETE'
-    );
+    const removed = await postgresRequest(workspaceClient, `/api/2.0/postgres/synced_tables/${syncedId}`, 'DELETE');
     await waitForPostgresOperation(workspaceClient, operationNameFrom(removed));
   }
   await postgresRequest(
@@ -1072,7 +1076,7 @@ function lakeLoadTestBranchId(branch: Record<string, unknown>) {
 }
 
 export function isLakeLoadTestBranch(branch: Record<string, unknown>) {
-  return /^(snapshot|restore)-[a-z0-9-]+$/.test(lakeLoadTestBranchId(branch));
+  return /^(demo|snapshot|restore)-[a-z0-9-]+$/.test(lakeLoadTestBranchId(branch));
 }
 
 async function purgeLakeLoadTestBranches(
@@ -1127,6 +1131,7 @@ async function monitorBranchOperation(
 ) {
   const id = String(operationRow.id);
   const branchName = String(operationRow.branch_name);
+  const kind = stringField(operationRow.kind, 'snapshot');
   let phase = stringField(operationRow.phase, 'branch');
   let operationName = stringField(operationRow.operation_name);
   const createCompute = booleanField(operationRow.create_compute);
@@ -1153,8 +1158,13 @@ async function monitorBranchOperation(
         if (endpoints.length > 0) {
           await control.query(
             `UPDATE lakeload_control.branch_operation SET status='completed',phase='compute',
-             message='Restore branch and dedicated compute are ready',completed_at=NOW() WHERE id=$1`,
-            [id]
+             message=$2,completed_at=NOW() WHERE id=$1`,
+            [
+              id,
+              kind === 'branch'
+                ? 'Live demo branch and dedicated compute are ready'
+                : 'Restore branch and dedicated compute are ready',
+            ]
           );
           return;
         }
@@ -1176,14 +1186,27 @@ async function monitorBranchOperation(
         phase = 'compute';
         await control.query(
           `UPDATE lakeload_control.branch_operation SET phase='compute',operation_name=$2,
-           message='Starting isolated restore compute' WHERE id=$1`,
-          [id, operationName]
+           message=$3 WHERE id=$1`,
+          [
+            id,
+            operationName,
+            kind === 'branch' ? 'Starting dedicated demo branch compute' : 'Starting isolated restore compute',
+          ]
         );
         continue;
       }
       await control.query(
         `UPDATE lakeload_control.branch_operation SET status='completed',message=$2,completed_at=NOW() WHERE id=$1`,
-        [id, phase === 'compute' ? 'Restore branch and compute are ready' : 'Snapshot branch is ready']
+        [
+          id,
+          phase === 'compute'
+            ? kind === 'branch'
+              ? 'Live demo branch and compute are ready'
+              : 'Restore branch and compute are ready'
+            : kind === 'branch'
+              ? 'Live demo branch is ready'
+              : 'Snapshot branch is ready',
+        ]
       );
       return;
     }
@@ -1256,9 +1279,9 @@ function metricsCsv(rows: Record<string, unknown>[]) {
         ? ''
         : input instanceof Date
           ? input.toISOString()
-        : typeof input === 'string' || typeof input === 'number' || typeof input === 'boolean'
-          ? String(input)
-          : JSON.stringify(input);
+          : typeof input === 'string' || typeof input === 'number' || typeof input === 'boolean'
+            ? String(input)
+            : JSON.stringify(input);
     return /[",\n]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
   };
   return [columns.join(','), ...rows.map((row) => columns.map((column) => escape(row[column])).join(','))].join('\n');
@@ -1439,10 +1462,9 @@ async function getReadiness(
       id: 'sync',
       label: 'Synced table',
       state: syncReady ? 'ready' : 'action',
-      detail:
-        syncReady
-          ? 'lakeload_sync.serving_profile is queryable from Lakebase'
-          : `Create a continuous synced table from ${destination}.lakeload_serving_profile.`,
+      detail: syncReady
+        ? 'lakeload_sync.serving_profile is queryable from Lakebase'
+        : `Create a continuous synced table from ${destination}.lakeload_serving_profile.`,
     },
     {
       id: 'search',

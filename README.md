@@ -14,8 +14,8 @@ LakeLoad is a real-time OLTP, OLAP, and LTAP benchmark suite for Databricks Lake
 - one-second live charts for workload/database TPS, p50/p95/p99 latency, connections, row churn, workload mix, cache hit rate, and lock waits
 - a persisted Settings selector for choosing and connection-testing the SQL warehouse used by every DBSQL workload
 - Settings choices to use an existing Unity Catalog schema, create a schema in an approved catalog, or create both catalog and schema
-- a guarded Hard Reset that purges only LakeLoad benchmark data, history, telemetry, snapshots, and restores
-- copy-on-write snapshots during active load and non-destructive restore into isolated branches with their own compute
+- a guarded Hard Reset that purges only LakeLoad benchmark data, history, telemetry, demo branches, snapshots, and restores
+- live copy-on-write branch creation, branch inspection switching, snapshots, and non-destructive restores during active load
 - deterministic PostgreSQL seed data and persistent run history
 - decision-grade comparison fingerprints, warm-up exclusion, repeatability checks, and JSON/CSV evidence exports
 - offered-rate and admission-drop telemetry so saturation is visible instead of hidden
@@ -24,7 +24,7 @@ LakeLoad is a real-time OLTP, OLAP, and LTAP benchmark suite for Databricks Lake
 
 ## Architecture
 
-The Databricks App stores run definitions and approximately one-second metric buckets in the `production` branch of the `lakeload` project. Every bucket records its actual width so rates remain accurate. Workload traffic is sent to the independent `benchmark` branch and compute endpoint. Snapshot and restore branches are copy-on-write and never replace the active benchmark branch. The App service principal receives scoped connect/run access through declared resources plus project `CAN_MANAGE` from the installer; no database password is stored.
+The Databricks App stores run definitions and approximately one-second metric buckets in the `production` branch of the `lakeload` project. Every bucket records its actual width so rates remain accurate. Workload traffic is sent to the independent `benchmark` branch and compute endpoint. Demo, snapshot, and restore branches are copy-on-write and never replace the active benchmark branch. Branch Lab can switch the inspected branch while existing workload connections remain on `benchmark`. The App service principal receives scoped connect/run access through declared resources plus project `CAN_MANAGE` from the installer; no database password is stored.
 
 See the [customer replication guide](docs/customer-guide.md), [benchmark review](docs/benchmark-review.md), [feature evaluation](docs/feature-evaluation.md), [validated labs results](docs/lab-results.md), and [full solution plan](docs/solution-plan.md).
 

@@ -1,12 +1,5 @@
 import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
-import {
-  Badge,
-  Button,
-  Tooltip,
-  TooltipContent,
-  TooltipProvider,
-  TooltipTrigger,
-} from '@databricks/appkit-ui/react';
+import { Badge, Button, Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@databricks/appkit-ui/react';
 import {
   Activity,
   ArchiveRestore,
@@ -131,7 +124,7 @@ interface Branch {
 
 interface BranchOperation {
   id: string;
-  kind: 'snapshot' | 'restore';
+  kind: 'branch' | 'snapshot' | 'restore';
   branch_name: string;
   source_branch: string;
   phase: 'branch' | 'compute';
@@ -375,9 +368,15 @@ const HELP = {
     'Creates a copy-on-write Lakebase branch from the current benchmark state. The source branch and active workload continue running.',
   restore:
     'Creates a new isolated read-write branch from the selected snapshot and provisions dedicated compute for it.',
-  logicalSize: 'The logical database size represented by the branch. Copy-on-write storage can use less physical storage.',
+  liveBranch:
+    'Forks the active benchmark branch with copy-on-write storage and provisions dedicated read-write compute. Existing workload connections remain on benchmark.',
+  branchInspection:
+    'Changes which branch details are displayed in Branch Lab. It does not move an already-running workload or its database connections.',
+  logicalSize:
+    'The logical database size represented by the branch. Copy-on-write storage can use less physical storage.',
   benchmarkSeed: 'The deterministic seed keeps generated values and workload choices repeatable across runs.',
-  setupPath: 'Choose whether the App service principal uses an existing schema or creates the missing schema and catalog.',
+  setupPath:
+    'Choose whether the App service principal uses an existing schema or creates the missing schema and catalog.',
   catalog: 'The Unity Catalog catalog that contains LakeLoad’s four Delta benchmark and serving tables.',
   schema: 'The Unity Catalog schema where LakeLoad creates its four prefixed Delta tables.',
   validateDestination:
@@ -386,10 +385,11 @@ const HELP = {
     'This Lakebase database is attached to the Databricks App resource and stores the PostgreSQL benchmark dataset.',
   warehouse:
     'The SQL warehouse that runs Delta preparation, DBSQL workloads, and the DBSQL side of engine comparisons.',
-  warehouseState: 'RUNNING starts queries immediately. A stopped warehouse adds startup time to preparation and benchmark runs.',
+  warehouseState:
+    'RUNNING starts queries immediately. A stopped warehouse adds startup time to preparation and benchmark runs.',
   readiness: 'A live preflight check of the resources and preview features required by LakeLoad scenarios.',
   hardReset:
-    'Deletes LakeLoad benchmark rows, its four Delta tables, Search corpus, continuous synced-table resource, run history, telemetry, snapshots, and restore branches. It keeps the App, registered Lakebase catalog, and base resources.',
+    'Deletes LakeLoad benchmark rows, its four Delta tables, Search corpus, continuous synced-table resource, run history, telemetry, demo branches, snapshots, and restore branches. It keeps the App, registered Lakebase catalog, and base resources.',
 } as const;
 
 const METRIC_HELP: Partial<Record<MetricKey, string>> = {
@@ -568,7 +568,7 @@ export default function App() {
       if (!response.ok) throw new Error(body.error ?? 'Branch operation could not start.');
       setNotice({
         kind: 'success',
-        message: `${input.kind === 'snapshot' ? 'Snapshot' : 'Restore'} started: ${body.branchName}`,
+        message: `${input.kind === 'branch' ? 'Live branch' : input.kind === 'snapshot' ? 'Snapshot' : 'Restore'} started: ${body.branchName}`,
       });
       await refresh();
     } catch (error) {
@@ -597,118 +597,119 @@ export default function App() {
   return (
     <TooltipProvider delayDuration={250} skipDelayDuration={100}>
       <div className="app-shell">
-      <aside className="side-rail">
-        <div className="brand-mark">
-          <Waves />
-        </div>
-        <nav aria-label="Primary navigation">
-          <RailButton label="Live telemetry" active={view === 'live'} onClick={() => setView('live')}>
-            <Activity />
-          </RailButton>
-          <RailButton label="Compare engines" active={view === 'compare'} onClick={() => setView('compare')}>
-            <Columns3 />
-          </RailButton>
-          <RailButton label="Branch lab" active={view === 'branches'} onClick={() => setView('branches')}>
-            <GitBranch />
-          </RailButton>
-          <RailButton label="Run history" active={view === 'runs'} onClick={() => setView('runs')}>
-            <History />
-          </RailButton>
-          <RailButton label="Settings" active={view === 'setup'} onClick={() => setView('setup')}>
-            <Settings2 />
-          </RailButton>
-        </nav>
-        <div className="rail-spacer" />
-        <Explained title="Lakebase connection" description="The App can connect to its Lakebase control database.">
-          <span className="connection-dot" role="status" tabIndex={0} aria-label="Lakebase connected" />
-        </Explained>
-      </aside>
-      <main className="workspace">
-        <header className="topbar">
-          <div>
-            <span className="eyebrow">Databricks Lakebase</span>
-            <h1>LakeLoad</h1>
+        <aside className="side-rail">
+          <div className="brand-mark">
+            <Waves />
           </div>
-          <div className="target-pill">
-            <span className="target-icon">
-              <Database />
-            </span>
-            <span>
-              <b>
-                {overview.endpoint.project} / {overview.endpoint.branch}
-              </b>
-              <small>
-                {overview.endpoint.endpoint} · PostgreSQL {overview.target.postgres_version}
-              </small>
-            </span>
-            <ShieldCheck className="target-ok" />
-          </div>
-        </header>
-        {notice && (
-          <div className={`notice-banner ${notice.kind}`} role="status">
-            <CircleAlert />
-            <span>{notice.message}</span>
-            <button aria-label="Dismiss message" onClick={() => setNotice(null)}>
-              ×
-            </button>
-          </div>
-        )}
-        {loading ? (
-          <LoadingState />
-        ) : view === 'live' ? (
-          <LiveConsole
-            overview={overview}
-            metrics={metrics}
-            latest={latest}
-            selectedRun={selectedRun}
-            selectedScenario={selectedScenario}
-            selectedScenarioId={selectedScenarioId}
-            engineFilter={engineFilter}
-            setEngineFilter={setEngineFilter}
-            chooseScenario={chooseScenario}
-            concurrency={concurrency}
-            setConcurrency={setConcurrency}
-            duration={duration}
-            setDuration={setDuration}
-            ramp={ramp}
-            setRamp={setRamp}
-            warmup={warmup}
-            setWarmup={setWarmup}
-            executionModel={executionModel}
-            setExecutionModel={setExecutionModel}
-            targetRps={targetRps}
-            setTargetRps={setTargetRps}
-            busy={busy}
-            launch={launch}
-            stop={stop}
-            progress={progress}
-            errorRate={errorRate}
-          />
-        ) : view === 'compare' ? (
-          <ComparisonView overview={overview} onOpenSetup={() => setView('setup')} />
-        ) : view === 'branches' ? (
-          <BranchLab
-            overview={overview}
-            metrics={metrics}
-            latest={latest}
-            busy={busy}
-            onAction={branchAction}
-            onRemove={removeBranch}
-          />
-        ) : view === 'runs' ? (
-          <RunHistory
-            overview={overview}
-            selectedRunId={selectedRunId}
-            onSelect={(id) => {
-              selectedRunRef.current = id;
-              setSelectedRunId(id);
-              setView('live');
-            }}
-          />
-        ) : (
-          <SetupView overview={overview} busy={busy} onPrepare={prepare} onWarehouseChanged={refresh} />
-        )}
-      </main>
+          <nav aria-label="Primary navigation">
+            <RailButton label="Live telemetry" active={view === 'live'} onClick={() => setView('live')}>
+              <Activity />
+            </RailButton>
+            <RailButton label="Compare engines" active={view === 'compare'} onClick={() => setView('compare')}>
+              <Columns3 />
+            </RailButton>
+            <RailButton label="Branch lab" active={view === 'branches'} onClick={() => setView('branches')}>
+              <GitBranch />
+            </RailButton>
+            <RailButton label="Run history" active={view === 'runs'} onClick={() => setView('runs')}>
+              <History />
+            </RailButton>
+            <RailButton label="Settings" active={view === 'setup'} onClick={() => setView('setup')}>
+              <Settings2 />
+            </RailButton>
+          </nav>
+          <div className="rail-spacer" />
+          <Explained title="Lakebase connection" description="The App can connect to its Lakebase control database.">
+            <span className="connection-dot" role="status" tabIndex={0} aria-label="Lakebase connected" />
+          </Explained>
+        </aside>
+        <main className="workspace">
+          <header className="topbar">
+            <div>
+              <span className="eyebrow">Databricks Lakebase</span>
+              <h1>LakeLoad</h1>
+            </div>
+            <div className="target-pill">
+              <span className="target-icon">
+                <Database />
+              </span>
+              <span>
+                <b>
+                  {overview.endpoint.project} / {overview.endpoint.branch}
+                </b>
+                <small>
+                  {overview.endpoint.endpoint} · PostgreSQL {overview.target.postgres_version}
+                </small>
+              </span>
+              <ShieldCheck className="target-ok" />
+            </div>
+          </header>
+          {notice && (
+            <div className={`notice-banner ${notice.kind}`} role="status">
+              <CircleAlert />
+              <span>{notice.message}</span>
+              <button aria-label="Dismiss message" onClick={() => setNotice(null)}>
+                ×
+              </button>
+            </div>
+          )}
+          {loading ? (
+            <LoadingState />
+          ) : view === 'live' ? (
+            <LiveConsole
+              overview={overview}
+              metrics={metrics}
+              latest={latest}
+              selectedRun={selectedRun}
+              selectedScenario={selectedScenario}
+              selectedScenarioId={selectedScenarioId}
+              engineFilter={engineFilter}
+              setEngineFilter={setEngineFilter}
+              chooseScenario={chooseScenario}
+              concurrency={concurrency}
+              setConcurrency={setConcurrency}
+              duration={duration}
+              setDuration={setDuration}
+              ramp={ramp}
+              setRamp={setRamp}
+              warmup={warmup}
+              setWarmup={setWarmup}
+              executionModel={executionModel}
+              setExecutionModel={setExecutionModel}
+              targetRps={targetRps}
+              setTargetRps={setTargetRps}
+              busy={busy}
+              launch={launch}
+              stop={stop}
+              onOpenBranches={() => setView('branches')}
+              progress={progress}
+              errorRate={errorRate}
+            />
+          ) : view === 'compare' ? (
+            <ComparisonView overview={overview} onOpenSetup={() => setView('setup')} />
+          ) : view === 'branches' ? (
+            <BranchLab
+              overview={overview}
+              metrics={metrics}
+              latest={latest}
+              busy={busy}
+              onAction={branchAction}
+              onRemove={removeBranch}
+            />
+          ) : view === 'runs' ? (
+            <RunHistory
+              overview={overview}
+              selectedRunId={selectedRunId}
+              onSelect={(id) => {
+                selectedRunRef.current = id;
+                setSelectedRunId(id);
+                setView('live');
+              }}
+            />
+          ) : (
+            <SetupView overview={overview} busy={busy} onPrepare={prepare} onWarehouseChanged={refresh} />
+          )}
+        </main>
       </div>
     </TooltipProvider>
   );
@@ -739,6 +740,7 @@ type LiveConsoleProps = {
   busy: boolean;
   launch: () => Promise<void>;
   stop: () => Promise<void>;
+  onOpenBranches: () => void;
   progress: number;
   errorRate: number;
 };
@@ -779,10 +781,7 @@ function LiveConsole(props: LiveConsoleProps) {
                 </button>
               </Explained>
               <Explained title="LTAP workloads" description={HELP.ltapEngine}>
-                <button
-                  className={props.engineFilter === 'ltap' ? 'active' : ''}
-                  onClick={() => selectEngine('ltap')}
-                >
+                <button className={props.engineFilter === 'ltap' ? 'active' : ''} onClick={() => selectEngine('ltap')}>
                   LTAP
                 </button>
               </Explained>
@@ -893,9 +892,19 @@ function LiveConsole(props: LiveConsoleProps) {
               </span>
             </div>
             {props.overview.activeRunId ? (
-              <Button variant="destructive" size="lg" onClick={() => void props.stop()}>
-                <Square /> Stop load
-              </Button>
+              <div className="active-run-actions">
+                <Explained
+                  title="Open Branch Lab"
+                  description="Create a copy-on-write branch, switch the branch view, and capture or restore snapshots while this workload continues on benchmark."
+                >
+                  <Button variant="outline" size="lg" onClick={props.onOpenBranches}>
+                    <GitBranch /> Open Branch Lab
+                  </Button>
+                </Explained>
+                <Button variant="destructive" size="lg" onClick={() => void props.stop()}>
+                  <Square /> Stop load
+                </Button>
+              </div>
             ) : (
               <Button
                 size="lg"
@@ -1010,7 +1019,11 @@ function LiveConsole(props: LiveConsoleProps) {
           />
         </div>
         {props.selectedRun && props.latest && (
-          <BottleneckInsight run={props.selectedRun} metric={props.latest} poolSize={props.overview.endpoint.poolSize} />
+          <BottleneckInsight
+            run={props.selectedRun}
+            metric={props.latest}
+            poolSize={props.overview.endpoint.poolSize}
+          />
         )}
         <div className="charts-grid">
           {props.selectedRun?.engine === 'ltap' && (
@@ -1533,7 +1546,13 @@ function RepeatabilityPanel({
     <section className="repeatability-panel surface">
       <div>
         <span className="section-kicker">Repeatability</span>
-        <h3>{stable ? 'Stable enough to quote' : complete ? 'Variation needs investigation' : 'Build a 3-pass evidence set'}</h3>
+        <h3>
+          {stable
+            ? 'Stable enough to quote'
+            : complete
+              ? 'Variation needs investigation'
+              : 'Build a 3-pass evidence set'}
+        </h3>
         <p>
           {complete
             ? 'Median p95 and full range across the latest three runs with this exact protocol.'
@@ -1543,15 +1562,23 @@ function RepeatabilityPanel({
       <div className="repeatability-engine lakebase">
         <span>Lakebase</span>
         <strong>{lakebaseRuns.length ? `${left.median.toFixed(1)} ms` : '—'}</strong>
-        <small>n={lakebaseRuns.length} · p95 range {left.spread.toFixed(1)}%</small>
+        <small>
+          n={lakebaseRuns.length} · p95 range {left.spread.toFixed(1)}%
+        </small>
       </div>
       <div className="repeatability-engine dbsql">
         <span>DBSQL</span>
         <strong>{dbsqlRuns.length ? `${right.median.toFixed(1)} ms` : '—'}</strong>
-        <small>n={dbsqlRuns.length} · p95 range {right.spread.toFixed(1)}%</small>
+        <small>
+          n={dbsqlRuns.length} · p95 range {right.spread.toFixed(1)}%
+        </small>
       </div>
       <Badge variant="outline" className={stable ? 'repeat-stable' : ''}>
-        {stable ? '≤15% spread' : complete ? '>15% spread' : `${Math.min(lakebaseRuns.length, dbsqlRuns.length)}/3 pairs`}
+        {stable
+          ? '≤15% spread'
+          : complete
+            ? '>15% spread'
+            : `${Math.min(lakebaseRuns.length, dbsqlRuns.length)}/3 pairs`}
       </Badge>
     </section>
   );
@@ -1790,8 +1817,14 @@ function ComparisonScorecard({
           left={left ? compact(value(left.total_operations)) : '—'}
           right={right ? compact(value(right.total_operations)) : '—'}
           description={HELP.completedOperations}
-          leftRating={relativeRating(left ? value(left.total_operations) : null, right ? value(right.total_operations) : null)}
-          rightRating={relativeRating(right ? value(right.total_operations) : null, left ? value(left.total_operations) : null)}
+          leftRating={relativeRating(
+            left ? value(left.total_operations) : null,
+            right ? value(right.total_operations) : null
+          )}
+          rightRating={relativeRating(
+            right ? value(right.total_operations) : null,
+            left ? value(left.total_operations) : null
+          )}
           guardrail="Higher at equal duration"
         />
       </div>
@@ -1915,7 +1948,8 @@ function comparisonVerdict(preset: ComparisonPreset, lakebase: RunDetails | null
         tone: 'pending',
         eyebrow: 'Awaiting both results',
         title: 'Run both workloads to evaluate engine fit',
-        detail: 'Lakebase will be rated against an operational latency target and DBSQL against an analytical latency target.',
+        detail:
+          'Lakebase will be rated against an operational latency target and DBSQL against an analytical latency target.',
         facts: ['Lakebase: OLTP target', 'DBSQL: OLAP target', 'Error ceiling: <1%'],
       };
     }
@@ -1961,7 +1995,8 @@ function comparisonVerdict(preset: ComparisonPreset, lakebase: RunDetails | null
       tone: 'split',
       eyebrow: 'Split decision',
       title: 'No single winner for different jobs',
-      detail: 'Use Lakebase for the operational request path and DBSQL for the analytical scan. Each result uses its own latency target.',
+      detail:
+        'Use Lakebase for the operational request path and DBSQL for the analytical scan. Each result uses its own latency target.',
       facts: [
         `Lakebase OLTP: ${leftRating.label}`,
         `DBSQL OLAP: ${rightRating.label}`,
@@ -2020,7 +2055,8 @@ function comparisonEligibility(
   if (!sameProtocol)
     return {
       eligible: false,
-      detail: 'The displayed historical runs use different concurrency, duration, ramp, warm-up, seed, or method versions. Run the pair above.',
+      detail:
+        'The displayed historical runs use different concurrency, duration, ramp, warm-up, seed, or method versions. Run the pair above.',
     };
   if (left.methodology_version !== 'v3' || right.methodology_version !== 'v3')
     return { eligible: false, detail: 'These results predate request-start phase classification. Run a v3 pair.' };
@@ -2059,6 +2095,8 @@ function BranchLab({
   onRemove: (id: string) => Promise<void>;
 }) {
   const benchmarkName = `projects/${overview.endpoint.project}/branches/${overview.endpoint.branch}`;
+  const productionName = `projects/${overview.endpoint.project}/branches/production`;
+  const demoBranches = overview.branches.filter((branch) => branchId(branch).startsWith('demo-'));
   const snapshots = overview.branches.filter((branch) => branchId(branch).startsWith('snapshot-'));
   const restores = overview.branches.filter((branch) => branchId(branch).startsWith('restore-'));
   const visibleOperations = overview.branchOperations.filter(
@@ -2068,35 +2106,86 @@ function BranchLab({
       overview.branches.some((branch) => branch.name === operation.branch_name)
   );
   const [selectedSnapshot, setSelectedSnapshot] = useState('');
+  const [requestedBranchName, setSelectedBranchName] = useState(benchmarkName);
   const [deleteBranch, setDeleteBranch] = useState('');
+  const demoId = `demo-${new Date().toISOString().slice(0, 19).replace(/[-:t]/gi, '')}`.toLowerCase();
   const snapshotId = `snapshot-${new Date().toISOString().slice(0, 19).replace(/[-:t]/gi, '')}`.toLowerCase();
   const restoreId = `restore-${new Date().toISOString().slice(0, 19).replace(/[-:t]/gi, '')}`.toLowerCase();
+  const selectableBranches = [...overview.branches].sort((left, right) => {
+    const order = (branch: Branch) => {
+      const id = branchId(branch);
+      if (id === 'production') return 0;
+      if (id === 'benchmark') return 1;
+      if (id.startsWith('demo-')) return 2;
+      if (id.startsWith('snapshot-')) return 3;
+      return 4;
+    };
+    return order(left) - order(right) || branchId(left).localeCompare(branchId(right));
+  });
+  const requestedBranchExists = overview.branches.some((branch) => branch.name === requestedBranchName);
+  const requestedBranchProvisioning = overview.branchOperations.some(
+    (operation) => operation.branch_name === requestedBranchName && ['queued', 'running'].includes(operation.status)
+  );
+  const selectedBranchName = requestedBranchExists || requestedBranchProvisioning ? requestedBranchName : benchmarkName;
+  const selectedBranch = overview.branches.find((branch) => branch.name === selectedBranchName);
+  const selectedOperation = overview.branchOperations.find(
+    (operation) => operation.branch_name === selectedBranchName && ['queued', 'running'].includes(operation.status)
+  );
+  const selectedSource =
+    selectedBranch?.status?.source_branch ?? selectedBranch?.spec?.source_branch ?? selectedOperation?.source_branch;
+  const selectedIsLoadTarget = selectedBranchName === benchmarkName;
+
+  function selectBranch(branchName: string, snapshot = false) {
+    setSelectedBranchName(branchName);
+    if (snapshot) setSelectedSnapshot(branchName);
+  }
+
   return (
     <>
       <section className="branch-hero surface">
         <div>
           <span className="section-kicker">Copy-on-write branch lab</span>
           <div className="heading-with-help">
-            <h2>Snapshot the database while it is under load</h2>
-            <HelpTip label="Lakebase snapshots" description={HELP.snapshot} />
+            <h2>Create and inspect branches while load continues</h2>
+            <HelpTip label="Live Lakebase branches" description={HELP.liveBranch} />
           </div>
           <p>
-            Capture the benchmark branch in seconds, then restore that state into an isolated branch with its own
-            compute. The active workload keeps running.
+            Fork the benchmark state, watch dedicated compute come online, and switch the branch view without stopping
+            the active workload.
           </p>
         </div>
-        <Explained title="Capture snapshot" description={HELP.snapshot}>
-          <Button
-            size="lg"
-            className="launch-button"
-            disabled={busy}
-            onClick={() =>
-              void onAction({ kind: 'snapshot', sourceBranch: benchmarkName, branchId: snapshotId, createCompute: false })
-            }
-          >
-            <GitBranch /> Capture snapshot
-          </Button>
-        </Explained>
+        <div className="branch-hero-actions">
+          <Explained title="Create live branch" description={HELP.liveBranch}>
+            <Button
+              size="lg"
+              className="launch-button"
+              disabled={busy}
+              onClick={() => {
+                setSelectedBranchName(`projects/${overview.endpoint.project}/branches/${demoId}`);
+                void onAction({ kind: 'branch', sourceBranch: benchmarkName, branchId: demoId, createCompute: true });
+              }}
+            >
+              <GitBranch /> Create live branch
+            </Button>
+          </Explained>
+          <Explained title="Capture snapshot" description={HELP.snapshot}>
+            <Button
+              variant="outline"
+              size="lg"
+              disabled={busy}
+              onClick={() =>
+                void onAction({
+                  kind: 'snapshot',
+                  sourceBranch: benchmarkName,
+                  branchId: snapshotId,
+                  createCompute: false,
+                })
+              }
+            >
+              <ArchiveRestore /> Capture snapshot
+            </Button>
+          </Explained>
+        </div>
       </section>
       <div className="branch-live-strip">
         <MetricCard
@@ -2125,9 +2214,82 @@ function BranchLab({
           label="Branches"
           value={String(overview.branches.length)}
           unit="total"
-          description="Lakebase branches currently visible to LakeLoad, including production, benchmark, snapshots, and restores."
+          description="Lakebase branches currently visible to LakeLoad, including production, benchmark, live demos, snapshots, and restores."
         />
       </div>
+      <section className="branch-role-strip surface" aria-label="Branch workload and inspection roles">
+        <div className="branch-role-copy">
+          <span className="branch-role-icon">
+            <Zap />
+          </span>
+          <span>
+            <small>Workload branch</small>
+            <strong>benchmark</strong>
+          </span>
+          <Badge variant="outline" className={overview.activeRunId ? 'status-running' : 'status-ready'}>
+            {overview.activeRunId ? 'load active' : 'next load target'}
+          </Badge>
+        </div>
+        <label className="branch-view-picker">
+          <HelpLabel label="Switch branch view" description={HELP.branchInspection} />
+          <select
+            aria-label="Switch branch view"
+            value={selectedBranchName}
+            onChange={(event) => {
+              const branchName = event.target.value;
+              selectBranch(branchName, branchId({ name: branchName }).startsWith('snapshot-'));
+            }}
+          >
+            {!selectedBranch && selectedOperation && (
+              <option value={selectedBranchName}>{branchId({ name: selectedBranchName })} · provisioning</option>
+            )}
+            {selectableBranches.map((branch) => (
+              <option key={branch.name} value={branch.name}>
+                {branchId(branch)}
+                {branch.name === benchmarkName ? ' · workload' : ''}
+              </option>
+            ))}
+          </select>
+        </label>
+        <div className="branch-view-note">
+          <ShieldCheck />
+          <span>
+            <small>Viewing branch</small>
+            <strong>{branchId({ name: selectedBranchName })}</strong>
+          </span>
+        </div>
+      </section>
+      <section className="branch-inspector surface" aria-label="Selected branch details">
+        <div>
+          <span className="section-kicker">Selected branch</span>
+          <h2>{branchId({ name: selectedBranchName })}</h2>
+          <p>
+            {selectedIsLoadTarget
+              ? 'This branch owns the current workload connections.'
+              : 'The workload remains on benchmark while you inspect this isolated branch.'}
+          </p>
+        </div>
+        <dl>
+          <div>
+            <dt>State</dt>
+            <dd>{selectedBranch ? branchState(selectedBranch) : (selectedOperation?.status ?? 'waiting')}</dd>
+          </div>
+          <div>
+            <dt>Source</dt>
+            <dd>{selectedSource ? branchId({ name: selectedSource }) : 'root branch'}</dd>
+          </div>
+          <div>
+            <dt>Logical size</dt>
+            <dd>{selectedBranch ? bytes(value(selectedBranch.status?.logical_size_bytes)) : 'calculating'}</dd>
+          </div>
+          <div>
+            <dt>Created</dt>
+            <dd>
+              {selectedBranch?.create_time ? new Date(selectedBranch.create_time).toLocaleTimeString() : 'in progress'}
+            </dd>
+          </div>
+        </dl>
+      </section>
       <section className="branch-canvas surface">
         <div className="section-heading">
           <div>
@@ -2143,65 +2305,108 @@ function BranchLab({
           </div>
         </div>
         <div className="branch-tree">
-          <BranchNode
-            type="root"
-            name="production"
-            state={branchState(overview.branches.find((branch) => branchId(branch) === 'production'))}
-            detail="control plane"
-          />
+          <button
+            className={`branch-node-button ${selectedBranchName === productionName ? 'selected' : ''}`}
+            aria-label="Inspect production branch"
+            onClick={() => selectBranch(productionName)}
+          >
+            <BranchNode
+              type="root"
+              name="production"
+              state={branchState(overview.branches.find((branch) => branchId(branch) === 'production'))}
+              detail="control plane"
+            />
+          </button>
           <span className="branch-link" />
-          <BranchNode
-            type="benchmark"
-            name="benchmark"
-            state={branchState(overview.branches.find((branch) => branchId(branch) === 'benchmark'))}
-            detail={overview.activeRunId ? 'load active' : 'load target'}
-            active={Boolean(overview.activeRunId)}
-          />
+          <button
+            className={`branch-node-button ${selectedBranchName === benchmarkName ? 'selected' : ''}`}
+            aria-label="Inspect benchmark branch"
+            onClick={() => selectBranch(benchmarkName)}
+          >
+            <BranchNode
+              type="benchmark"
+              name="benchmark"
+              state={branchState(overview.branches.find((branch) => branchId(branch) === 'benchmark'))}
+              detail={overview.activeRunId ? 'load active' : 'load target'}
+              active={Boolean(overview.activeRunId)}
+            />
+          </button>
           <span className="branch-split" />
           <div className="branch-children">
-            {snapshots.length === 0 ? (
+            {demoBranches.length + snapshots.length + restores.length === 0 ? (
               <div className="branch-empty">
                 <GitBranch />
-                <strong>No snapshot yet</strong>
-                <small>Capture one while the load graph is moving.</small>
+                <strong>No child branches yet</strong>
+                <small>Create a live branch while the load graph is moving.</small>
               </div>
-            ) : (
-              snapshots.map((branch) => (
-                <div className="snapshot-row" key={branch.name}>
-                  <Explained title="Snapshot branch" description={HELP.logicalSize}>
-                    <button
-                      className={`branch-select ${selectedSnapshot === branch.name ? 'selected' : ''}`}
-                      onClick={() => setSelectedSnapshot(branch.name ?? '')}
-                    >
-                      <BranchNode
-                        type="snapshot"
-                        name={branchId(branch)}
-                        state={branchState(branch)}
-                        detail={`${bytes(value(branch.status?.logical_size_bytes))} logical`}
-                      />
-                      <span className="branch-time">
-                        {branch.create_time ? new Date(branch.create_time).toLocaleTimeString() : 'creating'}
-                      </span>
-                    </button>
-                  </Explained>
+            ) : null}
+            {demoBranches.map((branch) => (
+              <div className="snapshot-row" key={branch.name}>
+                <Explained title="Live demo branch" description={HELP.liveBranch}>
                   <button
-                    className="branch-trash"
-                    aria-label={`Remove ${branchId(branch)}`}
-                    onClick={() => setDeleteBranch(branchId(branch))}
+                    className={`branch-select ${selectedBranchName === branch.name ? 'selected' : ''}`}
+                    onClick={() => selectBranch(branch.name ?? '')}
                   >
-                    <Trash2 />
+                    <BranchNode
+                      type="demo"
+                      name={branchId(branch)}
+                      state={branchState(branch)}
+                      detail="isolated compute"
+                    />
+                    <span className="branch-time">
+                      {branch.create_time ? new Date(branch.create_time).toLocaleTimeString() : 'creating'}
+                    </span>
                   </button>
-                </div>
-              ))
-            )}
+                </Explained>
+                <button
+                  className="branch-trash"
+                  aria-label={`Remove ${branchId(branch)}`}
+                  onClick={() => setDeleteBranch(branchId(branch))}
+                >
+                  <Trash2 />
+                </button>
+              </div>
+            ))}
+            {snapshots.map((branch) => (
+              <div className="snapshot-row" key={branch.name}>
+                <Explained title="Snapshot branch" description={HELP.logicalSize}>
+                  <button
+                    className={`branch-select ${selectedBranchName === branch.name ? 'selected' : ''}`}
+                    onClick={() => selectBranch(branch.name ?? '', true)}
+                  >
+                    <BranchNode
+                      type="snapshot"
+                      name={branchId(branch)}
+                      state={branchState(branch)}
+                      detail={`${bytes(value(branch.status?.logical_size_bytes))} logical`}
+                    />
+                    <span className="branch-time">
+                      {branch.create_time ? new Date(branch.create_time).toLocaleTimeString() : 'creating'}
+                    </span>
+                  </button>
+                </Explained>
+                <button
+                  className="branch-trash"
+                  aria-label={`Remove ${branchId(branch)}`}
+                  onClick={() => setDeleteBranch(branchId(branch))}
+                >
+                  <Trash2 />
+                </button>
+              </div>
+            ))}
             {restores.map((branch) => (
               <div className="restore-node" key={branch.name}>
-                <BranchNode
-                  type="restore"
-                  name={branchId(branch)}
-                  state={branchState(branch)}
-                  detail="isolated restore"
-                />
+                <button
+                  className={`branch-node-button ${selectedBranchName === branch.name ? 'selected' : ''}`}
+                  onClick={() => selectBranch(branch.name ?? '')}
+                >
+                  <BranchNode
+                    type="restore"
+                    name={branchId(branch)}
+                    state={branchState(branch)}
+                    detail="isolated restore"
+                  />
+                </button>
                 <button aria-label={`Remove ${branchId(branch)}`} onClick={() => setDeleteBranch(branchId(branch))}>
                   <Trash2 />
                 </button>
@@ -2252,8 +2457,8 @@ function BranchLab({
       <section className="branch-charts">
         <LiveChart
           live={Boolean(overview.activeRunId)}
-          title="Load during snapshot"
-          subtitle="TPS continues while branch state changes"
+          title="Load during branch operations"
+          subtitle="TPS continues while branches and dedicated computes are created"
           metrics={metrics}
           series={[
             { key: 'operations', label: 'workload TPS', tone: 'cyan' },
@@ -2262,8 +2467,8 @@ function BranchLab({
         />
         <LiveChart
           live={Boolean(overview.activeRunId)}
-          title="Latency during snapshot"
-          subtitle="Watch p95 and p99 while branches are created"
+          title="Latency during branch operations"
+          subtitle="Watch p95 and p99 while branches and snapshots are created"
           metrics={metrics}
           unit="ms"
           series={[
@@ -2425,8 +2630,10 @@ function SetupView({
           <small>
             Prepare automates reversible LakeLoad-owned setup. Native Lakebase CDF still must be started once on the
             benchmark branch for <code>lakeload_bench</code> into{' '}
-            <code>{overview.dataDestination.catalog}.{overview.dataDestination.schema}</code>. OpenTelemetry remains gated
-            until you provide a real OTLP destination in project settings.
+            <code>
+              {overview.dataDestination.catalog}.{overview.dataDestination.schema}
+            </code>
+            . OpenTelemetry remains gated until you provide a real OTLP destination in project settings.
           </small>
         </span>
       </div>
@@ -2498,11 +2705,7 @@ function DataDestinationSettings({
     setMode(overview.dataDestination.mode);
     setCatalog(overview.dataDestination.catalog);
     setSchema(overview.dataDestination.schema);
-  }, [
-    overview.dataDestination.catalog,
-    overview.dataDestination.mode,
-    overview.dataDestination.schema,
-  ]);
+  }, [overview.dataDestination.catalog, overview.dataDestination.mode, overview.dataDestination.schema]);
 
   async function saveDestination() {
     setSaving(true);
@@ -2611,7 +2814,9 @@ function DataDestinationSettings({
         </label>
         <Explained title="Validate and save destination" description={HELP.validateDestination}>
           <Button
-            disabled={busy || (mode !== 'create-catalog-schema' && loading) || saving || unchanged || !catalog || !schema}
+            disabled={
+              busy || (mode !== 'create-catalog-schema' && loading) || saving || unchanged || !catalog || !schema
+            }
             onClick={() => void saveDestination()}
           >
             {saving ? <RefreshCw className="spin" /> : <ShieldCheck />} Validate and save destination
@@ -2622,7 +2827,10 @@ function DataDestinationSettings({
         <ShieldCheck />
         <div className="destination-note-copy">
           <strong>
-            Tables created in <code>{catalog}.{schema}</code>
+            Tables created in{' '}
+            <code>
+              {catalog}.{schema}
+            </code>
           </strong>
           <div className="destination-table-list" aria-label="LakeLoad Delta tables">
             <code>lakeload_account</code>
@@ -2843,7 +3051,7 @@ function HardResetSettings({
             <code>
               {overview.dataDestination.catalog}.{overview.dataDestination.schema}
             </code>
-            , run history, telemetry, and every LakeLoad snapshot/restore branch.
+            , run history, telemetry, and every LakeLoad demo/snapshot/restore branch.
           </p>
           <small>The Lakebase project, benchmark branch, app deployment, and selected warehouse are preserved.</small>
         </div>
@@ -2876,13 +3084,13 @@ function HardResetSettings({
             All rows in the dedicated <code>lakeload_bench</code> PostgreSQL schema
           </li>
           <li>
-            <code>lakeload_account</code>, <code>lakeload_product</code>, <code>lakeload_history</code>, and the synced-table
-            source from{' '}
+            <code>lakeload_account</code>, <code>lakeload_product</code>, <code>lakeload_history</code>, and the
+            synced-table source from{' '}
             <code>
               {overview.dataDestination.catalog}.{overview.dataDestination.schema}
             </code>
           </li>
-          <li>All benchmark runs, metrics, snapshots, and restore branches</li>
+          <li>All benchmark runs, metrics, demo branches, snapshots, and restore branches</li>
           <li>The LakeLoad-owned continuous synced-table resource; an active native CDF audit feed is preserved</li>
         </ul>
         <p>
@@ -3058,7 +3266,9 @@ function LiveChart({
             {warmupWidth > 0 && (
               <g className="chart-warmup" aria-hidden="true">
                 <rect x={padding} y={padding} width={warmupWidth} height={height - 2 * padding} />
-                <text x={padding + 7} y={padding + 15}>WARM-UP · EXCLUDED</text>
+                <text x={padding + 7} y={padding + 15}>
+                  WARM-UP · EXCLUDED
+                </text>
               </g>
             )}
             <g className="grid-lines">
@@ -3092,7 +3302,9 @@ function LiveChart({
             >
               <div className="tooltip-time">
                 <span>Sample</span>
-                <strong>{inspected.elapsed_seconds}s · {inspected.phase}</strong>
+                <strong>
+                  {inspected.elapsed_seconds}s · {inspected.phase}
+                </strong>
               </div>
               {series.map((item) => {
                 const currentValue = value(inspected[item.key]);
@@ -3166,15 +3378,7 @@ function MetricCard({
     </div>
   );
 }
-function DataStat({
-  label,
-  value: displayValue,
-  description,
-}: {
-  label: string;
-  value: string;
-  description: string;
-}) {
+function DataStat({ label, value: displayValue, description }: { label: string; value: string; description: string }) {
   return (
     <div>
       <strong>{displayValue}</strong>
@@ -3256,15 +3460,7 @@ function RailButton({
   );
 }
 
-function HelpTip({
-  label,
-  description,
-  compact = false,
-}: {
-  label: string;
-  description: string;
-  compact?: boolean;
-}) {
+function HelpTip({ label, description, compact = false }: { label: string; description: string; compact?: boolean }) {
   return (
     <Tooltip>
       <TooltipTrigger asChild>
@@ -3289,15 +3485,7 @@ function HelpTip({
   );
 }
 
-function HelpLabel({
-  label,
-  description,
-  className = '',
-}: {
-  label: string;
-  description: string;
-  className?: string;
-}) {
+function HelpLabel({ label, description, className = '' }: { label: string; description: string; className?: string }) {
   return (
     <span className={`help-label ${className}`.trim()}>
       {label}
@@ -3306,15 +3494,7 @@ function HelpLabel({
   );
 }
 
-function Explained({
-  title,
-  description,
-  children,
-}: {
-  title: string;
-  description: string;
-  children: ReactNode;
-}) {
+function Explained({ title, description, children }: { title: string; description: string; children: ReactNode }) {
   return (
     <Tooltip>
       <TooltipTrigger asChild>{children}</TooltipTrigger>
@@ -3330,7 +3510,7 @@ function navigationHelp(label: string) {
   const descriptions: Record<string, string> = {
     'Live telemetry': 'Configure a workload, start or stop load, and inspect one-second Lakebase or DBSQL metrics.',
     'Compare engines': 'Run controlled Lakebase and DBSQL tests side by side and compare throughput and latency.',
-    'Branch lab': 'Create snapshots and isolated restore branches while the benchmark workload continues.',
+    'Branch lab': 'Create, switch between, snapshot, and restore isolated branches while benchmark load continues.',
     'Run history': 'Open completed benchmark runs and inspect their recorded metrics.',
     Settings: 'Prepare data, select Unity Catalog and DBSQL resources, check readiness, or reset the environment.',
   };

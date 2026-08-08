@@ -23,7 +23,11 @@ test('LakeLoad renders the workload console', async ({ page }) => {
   await expect(page.getByRole('button', { name: /Simulate load|Stop load/ })).toBeVisible();
   await expect(page.getByText('Live database telemetry', { exact: true })).toBeVisible();
   await page.getByRole('button', { name: 'Branch lab', exact: true }).click();
+  await expect(page.getByRole('button', { name: 'Create live branch', exact: true })).toBeVisible();
   await expect(page.getByRole('button', { name: /Capture snapshot/ })).toBeVisible();
+  await expect(page.getByRole('combobox', { name: /Switch branch view|Inspect branch/ })).toBeVisible();
+  await expect(page.getByText('Workload branch', { exact: true })).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'benchmark', exact: true })).toBeVisible();
   await expect(page.getByRole('heading', { name: 'Branch lineage', exact: true })).toBeVisible();
   const restoreBranch = page.getByRole('button', { name: 'Restore isolated branch', exact: true });
   await restoreBranch.evaluate((element) => {
@@ -38,7 +42,9 @@ test('LakeLoad renders the workload console', async ({ page }) => {
   await expect(page.locator('.evidence-quality')).toContainText(/Decision-grade pair|Not yet decision-grade/);
   await expect(page.locator('.repeatability-panel')).toContainText(/Repeatability/);
   await expect(page.locator('.comparison-verdict')).toContainText(/wins|Near tie|No single winner|select a winner/);
-  await expect(page.getByText('Ratings use the selected workload and visible guardrails', { exact: false })).toBeVisible();
+  await expect(
+    page.getByText('Ratings use the selected workload and visible guardrails', { exact: false })
+  ).toBeVisible();
   await expect(page.getByText('Stretch goal', { exact: true }).first()).toBeVisible();
   await expect(page.getByText('Within target', { exact: true }).first()).toBeVisible();
   await expect(page.getByText('Outside target', { exact: true }).first()).toBeVisible();
@@ -107,7 +113,7 @@ test('tooltips explain controls and terms across every surface', async ({ page }
   await expectHelp(page.getByRole('button', { name: 'About Matched workload', exact: true }), 'same query shape');
 
   await page.getByRole('button', { name: 'Branch lab', exact: true }).click();
-  await expectHelp(page.getByRole('button', { name: 'About Lakebase snapshots', exact: true }), 'copy-on-write');
+  await expectHelp(page.getByRole('button', { name: 'About Live Lakebase branches', exact: true }), 'copy-on-write');
 
   await page.getByRole('button', { name: 'Run history', exact: true }).click();
   await expectHelp(page.getByRole('button', { name: 'About Benchmark seed', exact: true }), 'repeatable across runs');

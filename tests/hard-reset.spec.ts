@@ -50,7 +50,7 @@ test('hard reset deletes only LakeLoad test state and supports clean preparation
     };
     expect(empty.target).toMatchObject({ accounts: 0, products: 0, history_rows: 0 });
     expect(empty.runs).toHaveLength(0);
-    expect(empty.branches.some((branch) => /\/(snapshot|restore)-/.test(branch.name ?? ''))).toBeFalsy();
+    expect(empty.branches.some((branch) => /\/(demo|snapshot|restore)-/.test(branch.name ?? ''))).toBeFalsy();
     expect(empty.sqlWarehouse.id).toBe(beforeBody.sqlWarehouse.id);
     await page.screenshot({ path: testInfo.outputPath('hard-reset-completed.png'), fullPage: true });
   } finally {

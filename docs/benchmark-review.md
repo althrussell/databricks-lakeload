@@ -14,19 +14,19 @@ The UI declares a comparison decision-grade only when both runs share the method
 
 ## Findings and resolutions
 
-| Area | Review finding | Resolution |
-|---|---|---|
-| OLTP parity | Lakebase used 10K accounts/1K products while DBSQL used 1M/10K, with different SQL shapes. | Both use the same seeded lookup over 1M accounts and 10K products. |
-| OLAP parity | PostgreSQL derived its product join differently from Delta. | Both persist `product_id` and run the same five-million-row aggregation. |
-| Open loop | DBSQL delayed closed-loop workers rather than maintaining independent arrivals. | Both engines schedule arrivals, cap in-flight work, and expose offered demand and admission drops. |
-| Rate accuracy | Counts were labeled per-second without recording sample width. | Every bucket stores `interval_ms`; rates are normalized. |
-| Tail latency | Coarse buckets distorted OLTP percentiles and failures could distort success latency. | Headline p50/p95/p99 use exact successful latencies. |
-| Warm state | Warm-up was described but not enforced or excluded. | Warm-up is configurable, shaded, and excluded from headline results. |
-| Reproducibility | Global random selection produced irreproducible request streams. | Every run uses a recorded deterministic per-worker seed. |
-| Errors | Query failures and client saturation were combined. | Query errors and admission drops are separate. |
-| Winner validity | Independent latest runs could be scored despite different settings. | The evidence gate blocks a winner until v3 fingerprints match. |
-| Confidence | A single pass could be quoted without variation. | Three-pass mode shows median p95 and full range; ≤15% spread is the stability target. |
-| Portability | Evidence only existed in the UI. | Every run exports self-describing JSON and per-sample CSV. |
+| Area            | Review finding                                                                             | Resolution                                                                                         |
+| --------------- | ------------------------------------------------------------------------------------------ | -------------------------------------------------------------------------------------------------- |
+| OLTP parity     | Lakebase used 10K accounts/1K products while DBSQL used 1M/10K, with different SQL shapes. | Both use the same seeded lookup over 1M accounts and 10K products.                                 |
+| OLAP parity     | PostgreSQL derived its product join differently from Delta.                                | Both persist `product_id` and run the same five-million-row aggregation.                           |
+| Open loop       | DBSQL delayed closed-loop workers rather than maintaining independent arrivals.            | Both engines schedule arrivals, cap in-flight work, and expose offered demand and admission drops. |
+| Rate accuracy   | Counts were labeled per-second without recording sample width.                             | Every bucket stores `interval_ms`; rates are normalized.                                           |
+| Tail latency    | Coarse buckets distorted OLTP percentiles and failures could distort success latency.      | Headline p50/p95/p99 use exact successful latencies.                                               |
+| Warm state      | Warm-up was described but not enforced or excluded.                                        | Warm-up is configurable, shaded, and excluded from headline results.                               |
+| Reproducibility | Global random selection produced irreproducible request streams.                           | Every run uses a recorded deterministic per-worker seed.                                           |
+| Errors          | Query failures and client saturation were combined.                                        | Query errors and admission drops are separate.                                                     |
+| Winner validity | Independent latest runs could be scored despite different settings.                        | The evidence gate blocks a winner until v3 fingerprints match.                                     |
+| Confidence      | A single pass could be quoted without variation.                                           | Three-pass mode shows median p95 and full range; ≤15% spread is the stability target.              |
+| Portability     | Evidence only existed in the UI.                                                           | Every run exports self-describing JSON and per-sample CSV.                                         |
 
 ## Metric contract
 
@@ -50,18 +50,18 @@ The UI declares a comparison decision-grade only when both runs share the method
 
 ## Feature coverage
 
-| Capability | Demonstration | Status |
-|---|---|---|
-| OLTP concurrency | Lookups, transfers, mixed traffic, bounded joins | Runnable |
-| OLAP comparison | Lookup anti-pattern, 5M scan/join, wide window | Runnable |
-| Real-time telemetry | Demand, throughput, latency, errors, drops, connections, locks, cache, churn | Runnable |
-| Branch/snapshot/restore | Snapshot during load and isolated restore compute | Runnable |
-| Evidence export | Manifest/method JSON and metric CSV | Runnable |
-| Lakebase CDF | Commit-to-Delta freshness | Gated by schema-level CDF activation and a queryable `lb_orders_history` destination |
-| Synced tables | Delta-to-Lakebase serving freshness | Runnable; continuous lab sync is online |
-| Lakebase Search | Keyword, vector, and hybrid search | Gated by irreversible project extension enablement |
-| Advanced Postgres telemetry | Query counters, waits, and plan diagnosis | Gated by a project Observability export to the selected schema |
-| OpenTelemetry | Run/trace correlation | Gated by an external OTLP collector |
+| Capability                  | Demonstration                                                                                  | Status                                                                               |
+| --------------------------- | ---------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------ |
+| OLTP concurrency            | Lookups, transfers, mixed traffic, bounded joins                                               | Runnable                                                                             |
+| OLAP comparison             | Lookup anti-pattern, 5M scan/join, wide window                                                 | Runnable                                                                             |
+| Real-time telemetry         | Demand, throughput, latency, errors, drops, connections, locks, cache, churn                   | Runnable                                                                             |
+| Branch/snapshot/restore     | Live branch creation, inspection switching, snapshot during load, and isolated restore compute | Runnable                                                                             |
+| Evidence export             | Manifest/method JSON and metric CSV                                                            | Runnable                                                                             |
+| Lakebase CDF                | Commit-to-Delta freshness                                                                      | Gated by schema-level CDF activation and a queryable `lb_orders_history` destination |
+| Synced tables               | Delta-to-Lakebase serving freshness                                                            | Runnable; continuous lab sync is online                                              |
+| Lakebase Search             | Keyword, vector, and hybrid search                                                             | Gated by irreversible project extension enablement                                   |
+| Advanced Postgres telemetry | Query counters, waits, and plan diagnosis                                                      | Gated by a project Observability export to the selected schema                       |
+| OpenTelemetry               | Run/trace correlation                                                                          | Gated by an external OTLP collector                                                  |
 
 Preview-gated features remain visible with remediation. LakeLoad does not claim a test ran when its prerequisite is absent.
 

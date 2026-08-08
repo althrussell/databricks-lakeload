@@ -465,6 +465,12 @@ h3 {
   gap: 1rem;
   margin-top: 1.15rem;
 }
+.active-run-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: var(--db-space-2);
+}
 .safety-note {
   display: flex;
   align-items: center;
@@ -1516,12 +1522,140 @@ h3 {
   color: var(--db-text-muted);
   line-height: 1.5;
 }
+.branch-hero-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--db-space-3);
+}
 .branch-live-strip {
   grid-template-columns: repeat(4, 1fr);
   margin-bottom: 1rem;
   border: 0.0625rem solid rgb(120 148 154 / 25%);
   border-radius: 0.75rem;
   overflow: hidden;
+}
+.branch-role-strip {
+  display: grid;
+  grid-template-columns: minmax(13rem, 0.8fr) minmax(18rem, 1.4fr) minmax(13rem, 0.8fr);
+  align-items: end;
+  gap: var(--db-space-4);
+  margin-bottom: var(--db-space-3);
+  padding: var(--db-space-4);
+}
+.branch-role-copy,
+.branch-view-note {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: var(--db-space-3);
+}
+.branch-role-copy > span:nth-child(2),
+.branch-view-note > span {
+  min-width: 0;
+  display: grid;
+  gap: var(--db-space-1);
+}
+.branch-role-copy small,
+.branch-view-note small,
+.branch-view-picker > span {
+  color: var(--db-text-muted);
+  font-size: 0.7rem;
+}
+.branch-role-copy strong,
+.branch-view-note strong {
+  overflow: hidden;
+  font-family: var(--db-font-mono);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.branch-role-icon {
+  width: 2.5rem;
+  height: 2.5rem;
+  display: grid;
+  flex: none;
+  place-items: center;
+  border-radius: var(--db-radius-md);
+  color: var(--db-success);
+  background: var(--db-surface-subtle);
+}
+.branch-role-icon svg,
+.branch-view-note > svg {
+  width: 1rem;
+}
+.branch-view-picker {
+  min-width: 0;
+  display: grid;
+  gap: var(--db-space-2);
+}
+.branch-view-picker select {
+  width: 100%;
+  min-height: 2.75rem;
+  padding: 0 var(--db-space-3);
+  border: 0.0625rem solid var(--db-border);
+  border-radius: var(--db-radius-md);
+  outline: none;
+  color: var(--db-text);
+  background: var(--db-surface-raised);
+  font-family: var(--db-font-mono);
+  cursor: pointer;
+  color-scheme: dark;
+}
+.branch-view-picker select:focus-visible {
+  border-color: var(--db-info);
+  box-shadow: 0 0 0 var(--db-space-1) var(--db-surface-subtle);
+}
+.branch-view-note {
+  justify-self: end;
+}
+.branch-view-note > svg {
+  color: var(--db-info);
+}
+.branch-inspector {
+  display: grid;
+  grid-template-columns: minmax(16rem, 0.8fr) minmax(30rem, 1.2fr);
+  align-items: center;
+  gap: var(--db-space-5);
+  margin-bottom: var(--db-space-3);
+  padding: var(--db-space-4);
+}
+.branch-inspector h2 {
+  margin: var(--db-space-1) 0 0;
+  font-family: var(--db-font-mono);
+  font-size: 1.15rem;
+}
+.branch-inspector p {
+  max-width: 60ch;
+  margin: var(--db-space-2) 0 0;
+  color: var(--db-text-muted);
+  line-height: 1.5;
+}
+.branch-inspector dl {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: var(--db-space-2);
+  margin: 0;
+}
+.branch-inspector dl > div {
+  min-width: 0;
+  display: grid;
+  gap: var(--db-space-1);
+  padding: var(--db-space-3);
+  border: 0.0625rem solid var(--db-border);
+  border-radius: var(--db-radius-md);
+  background: var(--db-surface-raised);
+}
+.branch-inspector dt {
+  color: var(--db-text-muted);
+  font-size: 0.65rem;
+  text-transform: uppercase;
+}
+.branch-inspector dd {
+  margin: 0;
+  overflow: hidden;
+  font-family: var(--db-font-mono);
+  font-size: 0.75rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .branch-canvas {
   padding: 1.2rem;
@@ -1544,6 +1678,35 @@ h3 {
   border: 0.0625rem solid var(--db-border);
   border-radius: 0.6rem;
   background: #0b2026;
+}
+.branch-node-button {
+  min-width: 0;
+  padding: var(--db-space-1);
+  border: 0.0625rem solid transparent;
+  border-radius: var(--db-radius-lg);
+  outline: none;
+  background: transparent;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition:
+    border-color var(--db-duration-fast) var(--db-ease-quart),
+    background var(--db-duration-fast) var(--db-ease-quart);
+}
+.branch-node-button:hover,
+.branch-node-button.selected {
+  border-color: var(--db-info);
+  background: var(--db-surface-subtle);
+}
+.branch-node-button:focus-visible,
+.branch-select:focus-visible,
+.branch-trash:focus-visible,
+.restore-node > button:focus-visible {
+  outline: 0.125rem solid var(--db-info);
+  outline-offset: var(--db-space-1);
+}
+.branch-node-button > .branch-node {
+  width: 100%;
 }
 .branch-node.active {
   border-color: var(--db-success);
@@ -1661,15 +1824,18 @@ h3 {
   display: flex;
   gap: 0.4rem;
 }
-.restore-node > button {
+.restore-node > button:not(.branch-node-button) {
   width: 2.75rem;
   border: 0;
   background: transparent;
   color: var(--db-error);
   cursor: pointer;
 }
-.restore-node > button svg {
+.restore-node > button:not(.branch-node-button) svg {
   width: 1rem;
+}
+.restore-node > .branch-node-button {
+  flex: 1;
 }
 .branch-actions {
   display: flex;
@@ -2482,6 +2648,18 @@ button.history-row:hover {
     align-items: flex-start;
     flex-direction: column;
   }
+  .branch-hero-actions {
+    width: 100%;
+    align-items: stretch;
+  }
+  .branch-role-strip,
+  .branch-inspector {
+    grid-template-columns: 1fr;
+    align-items: stretch;
+  }
+  .branch-view-note {
+    justify-self: start;
+  }
   .prepare-details {
     grid-template-columns: 1fr;
   }
@@ -2636,6 +2814,18 @@ button.history-row:hover {
   .branch-tree {
     align-items: flex-start;
     flex-direction: column;
+  }
+  .branch-hero-actions {
+    flex-direction: column;
+  }
+  .branch-hero-actions button {
+    width: 100%;
+  }
+  .branch-inspector dl {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .branch-role-copy {
+    flex-wrap: wrap;
   }
   .branch-link {
     width: 0;
