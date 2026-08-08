@@ -1106,6 +1106,7 @@ function LiveChart({
   unit?: string;
   live?: boolean;
 }) {
+  const [inspectionIndex, setInspectionIndex] = useState<number | null>(null);
   const width = 720,
     height = 220,
     padding = 22;
@@ -1118,6 +1119,24 @@ function LiveChart({
       )
       .join(' ');
   const latest = metrics.at(-1);
+  const inspected = inspectionIndex === null ? null : metrics[inspectionIndex];
+  const inspectedPrevious = inspectionIndex === null ? null : metrics[Math.max(0, inspectionIndex - 1)];
+  const inspectedX =
+    inspectionIndex === null
+      ? padding
+      : padding + (inspectionIndex / Math.max(1, metrics.length - 1)) * (width - 2 * padding);
+
+  function inspectAt(clientX: number, bounds: DOMRect) {
+    const relativeX = Math.max(0, Math.min(1, (clientX - bounds.left) / Math.max(1, bounds.width)));
+    setInspectionIndex(Math.round(relativeX * (metrics.length - 1)));
+  }
+
+  function moveInspection(direction: -1 | 1) {
+    setInspectionIndex((current) =>
+      Math.max(0, Math.min(metrics.length - 1, (current ?? metrics.length - 1) + direction))
+    );
+  }
+
   return (
     <article className="telemetry-chart surface">
       <header>
@@ -1139,21 +1158,81 @@ function LiveChart({
         ))}
       </div>
       {metrics.length > 1 ? (
-        <svg
-          viewBox={`0 0 ${width} ${height}`}
-          preserveAspectRatio="none"
-          role="img"
-          aria-label={`${title}, updated every second`}
-        >
-          <g className="grid-lines">
-            <line x1={padding} y1={padding} x2={width - padding} y2={padding} />
-            <line x1={padding} y1={height / 2} x2={width - padding} y2={height / 2} />
-            <line x1={padding} y1={height - padding} x2={width - padding} y2={height - padding} />
-          </g>
-          {series.map((item) => (
-            <polyline key={item.key} className={`chart-line ${item.tone}`} points={points(item.key)} />
-          ))}
-        </svg>
+        <div className="chart-plot">
+          <svg
+            className="chart-svg"
+            viewBox={`0 0 ${width} ${height}`}
+            preserveAspectRatio="none"
+            role="img"
+            tabIndex={0}
+            aria-label={`${title}, updated every second. Hover or use left and right arrow keys to inspect samples.`}
+            onPointerMove={(event) => inspectAt(event.clientX, event.currentTarget.getBoundingClientRect())}
+            onPointerLeave={() => setInspectionIndex(null)}
+            onFocus={() => setInspectionIndex(metrics.length - 1)}
+            onBlur={() => setInspectionIndex(null)}
+            onKeyDown={(event) => {
+              if (event.key === 'ArrowLeft') {
+                event.preventDefault();
+                moveInspection(-1);
+              } else if (event.key === 'ArrowRight') {
+                event.preventDefault();
+                moveInspection(1);
+              } else if (event.key === 'Escape') {
+                setInspectionIndex(null);
+                event.currentTarget.blur();
+              }
+            }}
+          >
+            <g className="grid-lines">
+              <line x1={padding} y1={padding} x2={width - padding} y2={padding} />
+              <line x1={padding} y1={height / 2} x2={width - padding} y2={height / 2} />
+              <line x1={padding} y1={height - padding} x2={width - padding} y2={height - padding} />
+            </g>
+            {series.map((item) => (
+              <polyline key={item.key} className={`chart-line ${item.tone}`} points={points(item.key)} />
+            ))}
+            {inspected && (
+              <g className="chart-inspection" aria-hidden="true">
+                <line className="chart-crosshair" x1={inspectedX} y1={padding} x2={inspectedX} y2={height - padding} />
+                {series.map((item) => (
+                  <circle
+                    key={item.key}
+                    className={`chart-point ${item.tone}`}
+                    cx={inspectedX}
+                    cy={height - padding - (value(inspected[item.key]) / max) * (height - 2 * padding)}
+                    r="4"
+                  />
+                ))}
+              </g>
+            )}
+          </svg>
+          {inspected && inspectedPrevious && (
+            <div
+              className={`chart-tooltip ${inspectionIndex !== null && inspectionIndex / metrics.length > 0.6 ? 'align-right' : ''}`}
+              style={{ left: `${(inspectedX / width) * 100}%` }}
+              role="status"
+            >
+              <div className="tooltip-time">
+                <span>Sample</span>
+                <strong>{inspected.elapsed_seconds}s</strong>
+              </div>
+              {series.map((item) => {
+                const currentValue = value(inspected[item.key]);
+                const previousValue = value(inspectedPrevious[item.key]);
+                return (
+                  <div className="tooltip-series" key={item.key}>
+                    <i className={item.tone} />
+                    <span>{item.label}</span>
+                    <strong>{formatChartValue(currentValue, unit)}</strong>
+                    <em className={changeTone(currentValue, previousValue)}>
+                      {formatChange(currentValue, previousValue)}
+                    </em>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </div>
       ) : (
         <div className="chart-empty">
           <Activity />
@@ -1166,6 +1245,23 @@ function LiveChart({
       </footer>
     </article>
   );
+}
+
+function formatChartValue(input: number, unit: string) {
+  const formatted = new Intl.NumberFormat('en', { maximumFractionDigits: 2 }).format(input);
+  return `${formatted}${unit}`;
+}
+
+function formatChange(current: number, previous: number) {
+  if (current === previous) return 'no change';
+  if (previous === 0) return 'new';
+  const change = ((current - previous) / Math.abs(previous)) * 100;
+  return `${change > 0 ? '+' : '−'}${Math.abs(change).toFixed(1)}%`;
+}
+
+function changeTone(current: number, previous: number) {
+  if (current === previous) return 'flat';
+  return current > previous ? 'up' : 'down';
 }
 
 function MetricCard({

@@ -38,12 +38,12 @@ test('every graph advances from the one-second live stream', async ({ page }, te
       })
       .toBeGreaterThanOrEqual(3);
     await expect(page.getByText('1s LIVE')).toHaveCount(6, { timeout: 20_000 });
-    await expectEveryChartToAdvance(page.locator('.charts-grid svg[aria-label$="updated every second"]'), 6);
+    await expectEveryChartToAdvance(page.locator('.charts-grid svg[aria-label*="updated every second"]'), 6);
     await page.screenshot({ path: testInfo.outputPath('live-console-1440.png'), fullPage: true });
 
     await page.getByRole('button', { name: 'Branch lab', exact: true }).click();
     await expect(page.getByText('1s LIVE')).toHaveCount(2);
-    await expectEveryChartToAdvance(page.locator('.branch-charts svg[aria-label$="updated every second"]'), 2);
+    await expectEveryChartToAdvance(page.locator('.branch-charts svg[aria-label*="updated every second"]'), 2);
     await page.screenshot({ path: testInfo.outputPath('branch-lab-1440.png'), fullPage: true });
   } finally {
     await page.getByRole('button', { name: 'Live telemetry', exact: true }).click();
@@ -89,4 +89,26 @@ test('wide console is centered within the space beside the navigation rail', asy
   });
   expect(Math.abs(geometry.leftGutter - geometry.rightGutter)).toBeLessThanOrEqual(1);
   await page.screenshot({ path: testInfo.outputPath('wide-centered-2476.png'), fullPage: true });
+});
+
+test('chart samples can be inspected with pointer and keyboard', async ({ page }, testInfo) => {
+  test.skip(remoteOnly, 'deployed chart interaction test');
+  await page.goto('/');
+  const chart = page.locator('.charts-grid svg[aria-label*="updated every second"]').first();
+  await expect(chart).toBeVisible();
+
+  await chart.hover({ position: { x: 160, y: 80 } });
+  const tooltip = page.locator('.charts-grid .chart-tooltip').first();
+  await expect(tooltip).toBeVisible();
+  await expect(tooltip.getByText('Sample', { exact: true })).toBeVisible();
+  await expect(tooltip.getByText('workload TPS', { exact: true })).toBeVisible();
+  await page.screenshot({ path: testInfo.outputPath('chart-hover-inspection.png'), fullPage: false });
+
+  await page.mouse.move(0, 0);
+  await expect(tooltip).toBeHidden();
+  await chart.focus();
+  await page.keyboard.press('ArrowLeft');
+  await expect(tooltip).toBeVisible();
+  await page.keyboard.press('Escape');
+  await expect(tooltip).toBeHidden();
 });

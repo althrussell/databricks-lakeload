@@ -225,6 +225,8 @@ LakeLoad does not provision an external collector.
 
 Every visible graph is driven by the same one-second metric stream for the selected active run. The console redraws throughput, latency, connection pressure, row churn, operation mix, and database health once per sample; the Branch Lab continues consuming that stream while control-plane branch operations are in progress.
 
+Hover any graph to inspect an exact one-second sample. The crosshair readout shows the sample time, each series value, and its percentage change from the previous sample. Keyboard users can focus a graph, move through samples with Left/Right Arrow, and press Escape to close the readout.
+
 | Metric                            | Meaning                                                                                                                                                |
 | --------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | Workload TPS                      | Successful application operations completed in that one-second interval.                                                                               |

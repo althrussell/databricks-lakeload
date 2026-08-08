@@ -737,11 +737,22 @@ h3 {
 .amber {
   color: var(--db-warning);
 }
+.chart-plot {
+  position: relative;
+}
 .telemetry-chart svg {
   width: 100%;
   height: 11.8rem;
   display: block;
   overflow: visible;
+}
+.chart-svg {
+  cursor: crosshair;
+}
+.chart-svg:focus-visible {
+  outline: 0.125rem solid var(--db-info);
+  outline-offset: 0.125rem;
+  border-radius: 0.25rem;
 }
 .grid-lines line {
   stroke: rgb(120 148 154 / 17%);
@@ -757,6 +768,88 @@ h3 {
   vector-effect: non-scaling-stroke;
   filter: drop-shadow(0 0 0.22rem currentColor);
   transition: 650ms linear;
+}
+.chart-crosshair {
+  stroke: var(--db-text-muted);
+  stroke-width: 1;
+  stroke-dasharray: 3 3;
+  vector-effect: non-scaling-stroke;
+}
+.chart-point {
+  fill: currentColor;
+  stroke: var(--db-navy-900);
+  stroke-width: 2;
+  vector-effect: non-scaling-stroke;
+  filter: drop-shadow(0 0 0.25rem currentColor);
+}
+.chart-tooltip {
+  position: absolute;
+  z-index: 5;
+  top: 0.5rem;
+  width: 13rem;
+  padding: 0.65rem;
+  border: 0.0625rem solid var(--db-border);
+  border-radius: 0.5rem;
+  background: rgb(7 24 29 / 96%);
+  box-shadow: 0 0.75rem 2rem rgb(0 0 0 / 35%);
+  pointer-events: none;
+  transform: translateX(0.75rem);
+}
+.chart-tooltip.align-right {
+  transform: translateX(calc(-100% - 0.75rem));
+}
+.tooltip-time,
+.tooltip-series {
+  display: grid;
+  align-items: center;
+  font-variant-numeric: tabular-nums;
+}
+.tooltip-time {
+  grid-template-columns: 1fr auto;
+  padding-bottom: 0.45rem;
+  border-bottom: 0.0625rem solid rgb(120 148 154 / 25%);
+  color: var(--db-text-muted);
+  font-family: var(--db-font-mono);
+  font-size: 0.62rem;
+  text-transform: uppercase;
+}
+.tooltip-time strong {
+  color: var(--db-text);
+}
+.tooltip-series {
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  gap: 0.25rem 0.45rem;
+  padding-top: 0.45rem;
+  font-size: 0.65rem;
+}
+.tooltip-series i {
+  width: 0.45rem;
+  height: 0.45rem;
+  border-radius: 50%;
+  background: currentColor;
+}
+.tooltip-series span {
+  overflow: hidden;
+  color: var(--db-text-muted);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.tooltip-series strong {
+  font-family: var(--db-font-mono);
+}
+.tooltip-series em {
+  grid-column: 2 / -1;
+  justify-self: end;
+  color: var(--db-text-subtle);
+  font-family: var(--db-font-mono);
+  font-size: 0.58rem;
+  font-style: normal;
+}
+.tooltip-series em.up {
+  color: var(--db-success);
+}
+.tooltip-series em.down {
+  color: var(--db-error);
 }
 .chart-empty {
   height: 11.8rem;
