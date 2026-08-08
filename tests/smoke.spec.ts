@@ -78,3 +78,29 @@ test('LakeLoad hard reset remains usable without mobile overflow', async ({ page
   }));
   expect(overflow.documentWidth, JSON.stringify(overflow)).toBeLessThanOrEqual(overflow.viewport);
 });
+
+test('tooltips explain controls and terms across every surface', async ({ page }) => {
+  await page.goto('/');
+
+  async function expectHelp(trigger: Locator, text: string) {
+    await trigger.focus();
+    const tooltip = page.locator('[data-slot="tooltip-content"]');
+    await expect(tooltip).toBeVisible();
+    await expect(tooltip).toContainText(text);
+    await page.keyboard.press('Escape');
+  }
+
+  await expectHelp(page.getByRole('button', { name: 'Target rate', exact: true }), 'requested arrival rate');
+
+  await page.getByRole('button', { name: 'Compare engines', exact: true }).click();
+  await expectHelp(page.getByRole('button', { name: 'About Matched workload', exact: true }), 'same query shape');
+
+  await page.getByRole('button', { name: 'Branch lab', exact: true }).click();
+  await expectHelp(page.getByRole('button', { name: 'About Lakebase snapshots', exact: true }), 'copy-on-write');
+
+  await page.getByRole('button', { name: 'Run history', exact: true }).click();
+  await expectHelp(page.getByRole('button', { name: 'About Benchmark seed', exact: true }), 'repeatable across runs');
+
+  await page.getByRole('button', { name: 'Settings', exact: true }).click();
+  await expectHelp(page.getByRole('button', { name: 'About Setup path', exact: true }), 'App service principal');
+});

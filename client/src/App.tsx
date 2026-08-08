@@ -1,11 +1,19 @@
 import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
-import { Badge, Button } from '@databricks/appkit-ui/react';
+import {
+  Badge,
+  Button,
+  Tooltip,
+  TooltipContent,
+  TooltipProvider,
+  TooltipTrigger,
+} from '@databricks/appkit-ui/react';
 import {
   Activity,
   ArchiveRestore,
   Boxes,
   Check,
   CircleAlert,
+  CircleHelp,
   Columns3,
   Database,
   GitBranch,
@@ -284,6 +292,81 @@ const metricKeys: Array<keyof Metric> = [
   'database_bytes',
 ];
 
+const HELP = {
+  lakebaseEngine:
+    'Runs the workload directly against Lakebase PostgreSQL. Use it for concurrent transactions, indexed lookups, and application request paths.',
+  dbsqlEngine:
+    'Runs the workload on the selected Databricks SQL warehouse. Use it for scans, joins, aggregations, and analytical concurrency.',
+  concurrentUsers:
+    'The number of virtual users allowed to issue requests at the same time. In closed loop, each user waits for its request to finish before sending another.',
+  duration: 'How long LakeLoad applies the configured workload after the ramp period begins.',
+  ramp: 'How long LakeLoad takes to increase from zero to the configured concurrency or target rate. Use a ramp to observe scaling behavior.',
+  closedLoop:
+    'Maintains a fixed number of virtual users. Each user sends its next request only after the previous request finishes, so achieved throughput changes with latency.',
+  targetRate:
+    'Schedules a requested arrival rate in operations per second, independent of response completion. Use it to increase demand until latency or errors show saturation.',
+  targetArrivalRate:
+    'The number of operations LakeLoad attempts to start each second. Actual completed throughput can be lower when the system or client pool is saturated.',
+  workloadTps: 'Operations completed by the load generator during the latest one-second sample.',
+  p50: 'Median request latency. Half of completed requests were faster and half were slower.',
+  p95: '95th-percentile request latency. 95% of completed requests were this fast or faster.',
+  p99: '99th-percentile request latency. This exposes slow tail requests that averages can hide.',
+  databaseTps: 'PostgreSQL transactions committed or rolled back during the latest one-second sample.',
+  connections: 'Total PostgreSQL sessions open against the benchmark endpoint, including active and idle sessions.',
+  cacheHit: 'Percentage of PostgreSQL block reads served from shared buffers instead of storage.',
+  errorRate: 'Failed workload operations divided by all attempted operations in the latest sample.',
+  autoscaling: 'The minimum and maximum compute units available to the Lakebase endpoint as demand changes.',
+  activeSessions: 'PostgreSQL sessions currently executing work compared with all open sessions.',
+  lockWaits: 'Sessions waiting for a PostgreSQL lock. Sustained waits can indicate transaction contention.',
+  sequentialComparison:
+    'LakeLoad runs Lakebase first and DBSQL second so the two engines do not compete for load-generator capacity.',
+  matchedWorkload:
+    'Both engines receive the same query shape, data range, client count, duration, and ramp. Compute architecture still differs by design.',
+  bestFitWorkload:
+    'Each engine receives the job it is designed to serve: operational requests on Lakebase and analytical processing on DBSQL.',
+  averageThroughput: 'Total completed operations divided by measured elapsed time for the run.',
+  completedOperations: 'All workload operations that completed successfully during the run.',
+  estimatedWallTime: 'Lakebase and DBSQL run sequentially, with a short handoff between them.',
+  snapshot:
+    'Creates a copy-on-write Lakebase branch from the current benchmark state. The source branch and active workload continue running.',
+  restore:
+    'Creates a new isolated read-write branch from the selected snapshot and provisions dedicated compute for it.',
+  logicalSize: 'The logical database size represented by the branch. Copy-on-write storage can use less physical storage.',
+  benchmarkSeed: 'The deterministic seed keeps generated values and workload choices repeatable across runs.',
+  setupPath: 'Choose whether the App service principal uses an existing schema or creates the missing schema and catalog.',
+  catalog: 'The Unity Catalog catalog that contains the three Delta benchmark tables used by DBSQL.',
+  schema: 'The Unity Catalog schema where LakeLoad creates its three prefixed Delta tables.',
+  validateDestination:
+    'Checks that the App service principal can access the destination and create and remove a temporary Delta table. It creates the catalog or schema when that setup path is selected.',
+  fixedLakebase:
+    'This Lakebase database is attached to the Databricks App resource and stores the PostgreSQL benchmark dataset.',
+  warehouse:
+    'The SQL warehouse that runs Delta preparation, DBSQL workloads, and the DBSQL side of engine comparisons.',
+  warehouseState: 'RUNNING starts queries immediately. A stopped warehouse adds startup time to preparation and benchmark runs.',
+  readiness: 'A live preflight check of the resources and preview features required by LakeLoad scenarios.',
+  hardReset:
+    'Deletes LakeLoad benchmark rows, its three Delta tables, run history, telemetry, snapshots, and restore branches. It keeps the App and base resources.',
+} as const;
+
+const METRIC_HELP: Partial<Record<MetricKey, string>> = {
+  operations: HELP.workloadTps,
+  database_tps: HELP.databaseTps,
+  p50_ms: HELP.p50,
+  p95_ms: HELP.p95,
+  p99_ms: HELP.p99,
+  connections_active: 'PostgreSQL sessions currently executing a query or transaction.',
+  connections_idle: 'Open PostgreSQL sessions waiting for the next client request.',
+  connections_total: HELP.connections,
+  rows_inserted: 'Rows inserted into PostgreSQL during the latest one-second sample.',
+  rows_updated: 'Rows updated in PostgreSQL during the latest one-second sample.',
+  rows_deleted: 'Rows deleted from PostgreSQL during the latest one-second sample.',
+  reads: 'Read operations completed by the selected workload in the latest sample.',
+  writes: 'Insert, update, or delete operations completed by the selected workload in the latest sample.',
+  complex_queries: 'Bounded joins or aggregate queries completed by the workload in the latest sample.',
+  cache_hit_pct: HELP.cacheHit,
+  locks_waiting: HELP.lockWaits,
+};
+
 export default function App() {
   const [view, setView] = useState<View>('live');
   const [overview, setOverview] = useState<Overview>(EMPTY);
@@ -297,7 +380,7 @@ export default function App() {
   const [executionModel, setExecutionModel] = useState<'closed' | 'open'>('closed');
   const [targetRps, setTargetRps] = useState(500);
   const [busy, setBusy] = useState(false);
-  const [loading, setLoading] = useState(false);
+  const [loading, setLoading] = useState(true);
   const [notice, setNotice] = useState<{ kind: 'error' | 'success'; message: string } | null>(null);
   const selectedRunRef = useRef<string | null>(null);
 
@@ -455,7 +538,8 @@ export default function App() {
   }
 
   return (
-    <div className="app-shell">
+    <TooltipProvider delayDuration={250} skipDelayDuration={100}>
+      <div className="app-shell">
       <aside className="side-rail">
         <div className="brand-mark">
           <Waves />
@@ -478,7 +562,9 @@ export default function App() {
           </RailButton>
         </nav>
         <div className="rail-spacer" />
-        <span className="connection-dot" title="Lakebase connected" />
+        <Explained title="Lakebase connection" description="The App can connect to its Lakebase control database.">
+          <span className="connection-dot" role="status" tabIndex={0} aria-label="Lakebase connected" />
+        </Explained>
       </aside>
       <main className="workspace">
         <header className="topbar">
@@ -564,7 +650,8 @@ export default function App() {
           <SetupView overview={overview} busy={busy} onPrepare={prepare} onWarehouseChanged={refresh} />
         )}
       </main>
-    </div>
+      </div>
+    </TooltipProvider>
   );
 }
 
@@ -609,18 +696,22 @@ function LiveConsole(props: LiveConsoleProps) {
               <h2>Shape the pressure</h2>
             </div>
             <div className="engine-switch">
-              <button
-                className={props.engineFilter === 'lakebase' ? 'active' : ''}
-                onClick={() => props.setEngineFilter('lakebase')}
-              >
-                Lakebase
-              </button>
-              <button
-                className={props.engineFilter === 'dbsql' ? 'active' : ''}
-                onClick={() => props.setEngineFilter('dbsql')}
-              >
-                DBSQL
-              </button>
+              <Explained title="Lakebase workloads" description={HELP.lakebaseEngine}>
+                <button
+                  className={props.engineFilter === 'lakebase' ? 'active' : ''}
+                  onClick={() => props.setEngineFilter('lakebase')}
+                >
+                  Lakebase
+                </button>
+              </Explained>
+              <Explained title="DBSQL workloads" description={HELP.dbsqlEngine}>
+                <button
+                  className={props.engineFilter === 'dbsql' ? 'active' : ''}
+                  onClick={() => props.setEngineFilter('dbsql')}
+                >
+                  DBSQL
+                </button>
+              </Explained>
             </div>
           </div>
           <div className="scenario-grid">
@@ -646,6 +737,7 @@ function LiveConsole(props: LiveConsoleProps) {
               max={150}
               onChange={props.setConcurrency}
               suffix=" VUs"
+              help={HELP.concurrentUsers}
             />
             <Range
               label="Duration"
@@ -655,23 +747,37 @@ function LiveConsole(props: LiveConsoleProps) {
               step={10}
               onChange={props.setDuration}
               suffix=" sec"
+              help={HELP.duration}
             />
-            <Range label="Ramp" value={props.ramp} min={0} max={60} step={5} onChange={props.setRamp} suffix=" sec" />
+            <Range
+              label="Ramp"
+              value={props.ramp}
+              min={0}
+              max={60}
+              step={5}
+              onChange={props.setRamp}
+              suffix=" sec"
+              help={HELP.ramp}
+            />
           </div>
           <div className="model-row">
             <div className="segmented">
-              <button
-                className={props.executionModel === 'closed' ? 'active' : ''}
-                onClick={() => props.setExecutionModel('closed')}
-              >
-                Closed loop
-              </button>
-              <button
-                className={props.executionModel === 'open' ? 'active' : ''}
-                onClick={() => props.setExecutionModel('open')}
-              >
-                Target rate
-              </button>
+              <Explained title="Closed loop" description={HELP.closedLoop}>
+                <button
+                  className={props.executionModel === 'closed' ? 'active' : ''}
+                  onClick={() => props.setExecutionModel('closed')}
+                >
+                  Closed loop
+                </button>
+              </Explained>
+              <Explained title="Target rate" description={HELP.targetRate}>
+                <button
+                  className={props.executionModel === 'open' ? 'active' : ''}
+                  onClick={() => props.setExecutionModel('open')}
+                >
+                  Target rate
+                </button>
+              </Explained>
             </div>
             {props.executionModel === 'open' && (
               <Range
@@ -682,6 +788,7 @@ function LiveConsole(props: LiveConsoleProps) {
                 step={10}
                 onChange={props.setTargetRps}
                 suffix=" ops/s"
+                help={HELP.targetArrivalRate}
               />
             )}
           </div>
@@ -747,27 +854,43 @@ function LiveConsole(props: LiveConsoleProps) {
             label="Workload TPS"
             value={compact(value(props.latest?.operations))}
             unit="ops/s"
+            description={HELP.workloadTps}
           />
-          <MetricCard icon={<Gauge />} label="P99 latency" value={value(props.latest?.p99_ms).toFixed(0)} unit="ms" />
+          <MetricCard
+            icon={<Gauge />}
+            label="P99 latency"
+            value={value(props.latest?.p99_ms).toFixed(0)}
+            unit="ms"
+            description={HELP.p99}
+          />
           <MetricCard
             icon={<Database />}
             label="Database tx"
             value={compact(value(props.latest?.database_tps))}
             unit="tx/s"
+            description={HELP.databaseTps}
           />
           <MetricCard
             icon={<Activity />}
             label="Connections"
             value={String(value(props.latest?.connections_total))}
             unit="open"
+            description={HELP.connections}
           />
           <MetricCard
             icon={<ShieldCheck />}
             label="Cache hit"
             value={value(props.latest?.cache_hit_pct).toFixed(1)}
             unit="%"
+            description={HELP.cacheHit}
           />
-          <MetricCard icon={<CircleAlert />} label="Error rate" value={props.errorRate.toFixed(2)} unit="%" />
+          <MetricCard
+            icon={<CircleAlert />}
+            label="Error rate"
+            value={props.errorRate.toFixed(2)}
+            unit="%"
+            description={HELP.errorRate}
+          />
         </div>
         <div className="charts-grid">
           <LiveChart
@@ -860,22 +983,34 @@ function DatabaseCore({ overview, latest, running }: { overview: Overview; lates
         <small>TPS</small>
       </div>
       <div className="core-stats">
-        <DataStat label="Accounts" value={compact(value(overview.target.accounts))} />
-        <DataStat label="History" value={compact(value(overview.target.history_rows))} />
-        <DataStat label="Size" value={bytes(value(latest?.database_bytes))} />
+        <DataStat
+          label="Accounts"
+          value={compact(value(overview.target.accounts))}
+          description="Seeded account rows available to Lakebase operational workloads."
+        />
+        <DataStat
+          label="History"
+          value={compact(value(overview.target.history_rows))}
+          description="Historical transaction rows available to analytical and mixed workloads."
+        />
+        <DataStat
+          label="Size"
+          value={bytes(value(latest?.database_bytes))}
+          description="Current PostgreSQL database size reported by Lakebase."
+        />
       </div>
       <div className="endpoint-detail">
-        <span>Compute</span>
+        <HelpLabel label="Compute" description={HELP.autoscaling} />
         <b>{overview.endpoint.autoscaling} autoscaling</b>
       </div>
       <div className="endpoint-detail">
-        <span>Active sessions</span>
+        <HelpLabel label="Active sessions" description={HELP.activeSessions} />
         <b>
           {value(latest?.connections_active)} / {value(latest?.connections_total)}
         </b>
       </div>
       <div className="endpoint-detail">
-        <span>Lock waits</span>
+        <HelpLabel label="Lock waits" description={HELP.lockWaits} />
         <b>{value(latest?.locks_waiting)}</b>
       </div>
     </aside>
@@ -1006,7 +1141,7 @@ function ComparisonView({ overview, onOpenSetup }: { overview: Overview; onOpenS
         <div className="comparison-method">
           <ShieldCheck />
           <span>
-            Sequential execution
+            <HelpLabel label="Sequential execution" description={HELP.sequentialComparison} />
             <small>
               DBSQL: {overview.sqlWarehouse.name} · {overview.sqlWarehouse.clusterSize}
             </small>
@@ -1031,7 +1166,13 @@ function ComparisonView({ overview, onOpenSetup }: { overview: Overview; onOpenS
 
       <section className="comparison-control surface">
         <div className="comparison-definition">
-          <Badge variant="outline">{preset.matched ? 'matched workload' : 'best-fit workloads'}</Badge>
+          <div className="badge-with-help">
+            <Badge variant="outline">{preset.matched ? 'matched workload' : 'best-fit workloads'}</Badge>
+            <HelpTip
+              label={preset.matched ? 'Matched workload' : 'Best-fit workloads'}
+              description={preset.matched ? HELP.matchedWorkload : HELP.bestFitWorkload}
+            />
+          </div>
           <div>
             <strong>{preset.method}</strong>
             <p>{preset.interpretation}</p>
@@ -1045,6 +1186,7 @@ function ComparisonView({ overview, onOpenSetup }: { overview: Overview; onOpenS
             max={50}
             onChange={setConcurrency}
             suffix=" VUs"
+            help={HELP.concurrentUsers}
           />
           <Range
             label="Per-engine duration"
@@ -1054,12 +1196,23 @@ function ComparisonView({ overview, onOpenSetup }: { overview: Overview; onOpenS
             step={5}
             onChange={setDuration}
             suffix=" sec"
+            help={HELP.duration}
           />
-          <Range label="Ramp" value={ramp} min={0} max={20} step={1} onChange={setRamp} suffix=" sec" />
+          <Range
+            label="Ramp"
+            value={ramp}
+            min={0}
+            max={20}
+            step={1}
+            onChange={setRamp}
+            suffix=" sec"
+            help={HELP.ramp}
+          />
         </div>
         <div className="comparison-launch">
           <span>
-            Estimated wall time <b>{duration * 2 + 2}s</b>
+            <HelpLabel label="Estimated wall time" description={HELP.estimatedWallTime} />{' '}
+            <b>{duration * 2 + 2}s</b>
           </span>
           {!ready ? (
             <Button size="lg" onClick={onOpenSetup}>
@@ -1148,10 +1301,30 @@ function ComparisonLane({
         </Badge>
       </header>
       <div className="comparison-kpis">
-        <ComparisonKpi label="Average throughput" value={run ? averageTps.toFixed(1) : '—'} unit="ops/s" />
-        <ComparisonKpi label="P95 latency" value={run ? value(run.p95_ms).toFixed(0) : '—'} unit="ms" />
-        <ComparisonKpi label="P99 latency" value={run ? value(run.p99_ms).toFixed(0) : '—'} unit="ms" />
-        <ComparisonKpi label="Error rate" value={run ? errorRate.toFixed(2) : '—'} unit="%" />
+        <ComparisonKpi
+          label="Average throughput"
+          value={run ? averageTps.toFixed(1) : '—'}
+          unit="ops/s"
+          description={HELP.averageThroughput}
+        />
+        <ComparisonKpi
+          label="P95 latency"
+          value={run ? value(run.p95_ms).toFixed(0) : '—'}
+          unit="ms"
+          description={HELP.p95}
+        />
+        <ComparisonKpi
+          label="P99 latency"
+          value={run ? value(run.p99_ms).toFixed(0) : '—'}
+          unit="ms"
+          description={HELP.p99}
+        />
+        <ComparisonKpi
+          label="Error rate"
+          value={run ? errorRate.toFixed(2) : '—'}
+          unit="%"
+          description={HELP.errorRate}
+        />
       </div>
       <div className="comparison-charts">
         <LiveChart
@@ -1185,10 +1358,20 @@ function ComparisonLane({
   );
 }
 
-function ComparisonKpi({ label, value: displayValue, unit }: { label: string; value: string; unit: string }) {
+function ComparisonKpi({
+  label,
+  value: displayValue,
+  unit,
+  description,
+}: {
+  label: string;
+  value: string;
+  unit: string;
+  description: string;
+}) {
   return (
     <div>
-      <span>{label}</span>
+      <HelpLabel label={label} description={description} />
       <strong>
         {displayValue}
         <small>{unit}</small>
@@ -1224,21 +1407,29 @@ function ComparisonScorecard({
           <span>Lakebase</span>
           <span>DBSQL</span>
         </div>
-        <ComparisonRow label="Average throughput" left={comparisonTps(lakebase)} right={comparisonTps(dbsql)} />
+        <ComparisonRow
+          label="Average throughput"
+          left={comparisonTps(lakebase)}
+          right={comparisonTps(dbsql)}
+          description={HELP.averageThroughput}
+        />
         <ComparisonRow
           label="P95 latency"
           left={left ? `${value(left.p95_ms).toFixed(0)} ms` : '—'}
           right={right ? `${value(right.p95_ms).toFixed(0)} ms` : '—'}
+          description={HELP.p95}
         />
         <ComparisonRow
           label="P99 latency"
           left={left ? `${value(left.p99_ms).toFixed(0)} ms` : '—'}
           right={right ? `${value(right.p99_ms).toFixed(0)} ms` : '—'}
+          description={HELP.p99}
         />
         <ComparisonRow
           label="Completed operations"
           left={left ? compact(value(left.total_operations)) : '—'}
           right={right ? compact(value(right.total_operations)) : '—'}
+          description={HELP.completedOperations}
         />
       </div>
       <div className="comparison-observation">
@@ -1252,10 +1443,20 @@ function ComparisonScorecard({
   );
 }
 
-function ComparisonRow({ label, left, right }: { label: string; left: string; right: string }) {
+function ComparisonRow({
+  label,
+  left,
+  right,
+  description,
+}: {
+  label: string;
+  left: string;
+  right: string;
+  description: string;
+}) {
   return (
     <div className="comparison-row" role="row">
-      <span>{label}</span>
+      <HelpLabel label={label} description={description} />
       <strong>{left}</strong>
       <strong>{right}</strong>
     </div>
@@ -1323,33 +1524,57 @@ function BranchLab({
       <section className="branch-hero surface">
         <div>
           <span className="section-kicker">Copy-on-write branch lab</span>
-          <h2>Snapshot the database while it is under load</h2>
+          <div className="heading-with-help">
+            <h2>Snapshot the database while it is under load</h2>
+            <HelpTip label="Lakebase snapshots" description={HELP.snapshot} />
+          </div>
           <p>
             Capture the benchmark branch in seconds, then restore that state into an isolated branch with its own
             compute. The active workload keeps running.
           </p>
         </div>
-        <Button
-          size="lg"
-          className="launch-button"
-          disabled={busy}
-          onClick={() =>
-            void onAction({ kind: 'snapshot', sourceBranch: benchmarkName, branchId: snapshotId, createCompute: false })
-          }
-        >
-          <GitBranch /> Capture snapshot
-        </Button>
+        <Explained title="Capture snapshot" description={HELP.snapshot}>
+          <Button
+            size="lg"
+            className="launch-button"
+            disabled={busy}
+            onClick={() =>
+              void onAction({ kind: 'snapshot', sourceBranch: benchmarkName, branchId: snapshotId, createCompute: false })
+            }
+          >
+            <GitBranch /> Capture snapshot
+          </Button>
+        </Explained>
       </section>
       <div className="branch-live-strip">
-        <MetricCard icon={<Zap />} label="Live TPS" value={compact(value(latest?.operations))} unit="ops/s" />
-        <MetricCard icon={<Gauge />} label="Live p99" value={value(latest?.p99_ms).toFixed(0)} unit="ms" />
+        <MetricCard
+          icon={<Zap />}
+          label="Live TPS"
+          value={compact(value(latest?.operations))}
+          unit="ops/s"
+          description={HELP.workloadTps}
+        />
+        <MetricCard
+          icon={<Gauge />}
+          label="Live p99"
+          value={value(latest?.p99_ms).toFixed(0)}
+          unit="ms"
+          description={HELP.p99}
+        />
         <MetricCard
           icon={<Activity />}
           label="Connections"
           value={String(value(latest?.connections_total))}
           unit="open"
+          description={HELP.connections}
         />
-        <MetricCard icon={<Boxes />} label="Branches" value={String(overview.branches.length)} unit="total" />
+        <MetricCard
+          icon={<Boxes />}
+          label="Branches"
+          value={String(overview.branches.length)}
+          unit="total"
+          description="Lakebase branches currently visible to LakeLoad, including production, benchmark, snapshots, and restores."
+        />
       </div>
       <section className="branch-canvas surface">
         <div className="section-heading">
@@ -1357,7 +1582,13 @@ function BranchLab({
             <span className="section-kicker">Live topology</span>
             <h2>Branch lineage</h2>
           </div>
-          <Badge variant="outline">refreshes every second</Badge>
+          <div className="badge-with-help">
+            <Badge variant="outline">refreshes every second</Badge>
+            <HelpTip
+              label="Live topology refresh"
+              description="LakeLoad polls branch state every second while this screen is open."
+            />
+          </div>
         </div>
         <div className="branch-tree">
           <BranchNode
@@ -1385,20 +1616,22 @@ function BranchLab({
             ) : (
               snapshots.map((branch) => (
                 <div className="snapshot-row" key={branch.name}>
-                  <button
-                    className={`branch-select ${selectedSnapshot === branch.name ? 'selected' : ''}`}
-                    onClick={() => setSelectedSnapshot(branch.name ?? '')}
-                  >
-                    <BranchNode
-                      type="snapshot"
-                      name={branchId(branch)}
-                      state={branchState(branch)}
-                      detail={`${bytes(value(branch.status?.logical_size_bytes))} logical`}
-                    />
-                    <span className="branch-time">
-                      {branch.create_time ? new Date(branch.create_time).toLocaleTimeString() : 'creating'}
-                    </span>
-                  </button>
+                  <Explained title="Snapshot branch" description={HELP.logicalSize}>
+                    <button
+                      className={`branch-select ${selectedSnapshot === branch.name ? 'selected' : ''}`}
+                      onClick={() => setSelectedSnapshot(branch.name ?? '')}
+                    >
+                      <BranchNode
+                        type="snapshot"
+                        name={branchId(branch)}
+                        state={branchState(branch)}
+                        detail={`${bytes(value(branch.status?.logical_size_bytes))} logical`}
+                      />
+                      <span className="branch-time">
+                        {branch.create_time ? new Date(branch.create_time).toLocaleTimeString() : 'creating'}
+                      </span>
+                    </button>
+                  </Explained>
                   <button
                     className="branch-trash"
                     aria-label={`Remove ${branchId(branch)}`}
@@ -1431,20 +1664,22 @@ function BranchLab({
               Restore creates a new branch with dedicated read-write compute. It does not interrupt benchmark.
             </small>
           </div>
-          <Button
-            size="lg"
-            disabled={!selectedSnapshot || busy}
-            onClick={() =>
-              void onAction({
-                kind: 'restore',
-                sourceBranch: selectedSnapshot,
-                branchId: restoreId,
-                createCompute: true,
-              })
-            }
-          >
-            <ArchiveRestore /> Restore isolated branch
-          </Button>
+          <Explained title="Restore isolated branch" description={HELP.restore}>
+            <Button
+              size="lg"
+              disabled={!selectedSnapshot || busy}
+              onClick={() =>
+                void onAction({
+                  kind: 'restore',
+                  sourceBranch: selectedSnapshot,
+                  branchId: restoreId,
+                  createCompute: true,
+                })
+              }
+            >
+              <ArchiveRestore /> Restore isolated branch
+            </Button>
+          </Explained>
         </div>
         <div className="operation-feed">
           <span className="section-kicker">Operation stream</span>
@@ -1514,15 +1749,18 @@ function RunHistory({
           <span className="section-kicker">Run ledger</span>
           <h2>Measured experiments</h2>
         </div>
-        <Badge variant="outline">seed 424242</Badge>
+        <div className="badge-with-help">
+          <Badge variant="outline">seed 424242</Badge>
+          <HelpTip label="Benchmark seed" description={HELP.benchmarkSeed} />
+        </div>
       </div>
       <div className="history-table" role="table" aria-label="Recent benchmark runs">
         <div className="history-row history-head" role="row">
           <span>Scenario</span>
           <span>Engine</span>
-          <span>Users</span>
-          <span>Operations</span>
-          <span>P95</span>
+          <HelpLabel label="Users" description={HELP.concurrentUsers} />
+          <HelpLabel label="Operations" description={HELP.completedOperations} />
+          <HelpLabel label="P95" description={HELP.p95} />
           <span>Status</span>
         </div>
         {overview.runs.map((run) => (
@@ -1568,7 +1806,13 @@ function SetupView({
       <div className="setup-hero">
         <div className="prepare-copy">
           <span className="section-kicker">Benchmark data</span>
-          <h2>Prepare benchmark datasets</h2>
+          <div className="heading-with-help">
+            <h2>Prepare benchmark datasets</h2>
+            <HelpTip
+              label="Prepare benchmark data"
+              description="Creates missing deterministic rows in Lakebase and the selected Unity Catalog schema. Existing benchmark rows are kept."
+            />
+          </div>
           <p>Creates or verifies the fixed-scale datasets used by every Lakebase and DBSQL scenario.</p>
           <div className="prepare-details" aria-label="Preparation details">
             <div>
@@ -1618,7 +1862,10 @@ function SetupView({
       <div className="section-heading">
         <div>
           <span className="section-kicker">Environment</span>
-          <h2>Capability readiness</h2>
+          <div className="heading-with-help">
+            <h2>Capability readiness</h2>
+            <HelpTip label="Capability readiness" description={HELP.readiness} />
+          </div>
         </div>
         <Badge variant="outline">live preflight</Badge>
       </div>
@@ -1653,7 +1900,7 @@ function DataDestinationSettings({
   const [schema, setSchema] = useState(overview.dataDestination.schema);
   const [catalogs, setCatalogs] = useState<string[]>([]);
   const [schemas, setSchemas] = useState<string[]>([]);
-  const [loading, setLoading] = useState(true);
+  const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
   const [message, setMessage] = useState<{ kind: 'success' | 'error'; text: string } | null>(null);
 
@@ -1724,7 +1971,7 @@ function DataDestinationSettings({
         </div>
       </div>
       <div className="destination-fixed">
-        <span>Lakebase PostgreSQL</span>
+        <HelpLabel label="Lakebase PostgreSQL" description={HELP.fixedLakebase} />
         <code>
           {overview.endpoint.project}/{overview.endpoint.branch}/{overview.target.database}
         </code>
@@ -1732,7 +1979,7 @@ function DataDestinationSettings({
       </div>
       <div className="destination-form">
         <label>
-          <span>Setup path</span>
+          <HelpLabel label="Setup path" description={HELP.setupPath} />
           <select
             aria-label="Destination setup path"
             value={mode}
@@ -1745,7 +1992,7 @@ function DataDestinationSettings({
           </select>
         </label>
         <label>
-          <span>Catalog</span>
+          <HelpLabel label="Catalog" description={HELP.catalog} />
           {mode === 'create-catalog-schema' ? (
             <input
               aria-label="Benchmark catalog"
@@ -1772,7 +2019,7 @@ function DataDestinationSettings({
           )}
         </label>
         <label>
-          <span>Schema</span>
+          <HelpLabel label="Schema" description={HELP.schema} />
           {mode === 'existing-schema' ? (
             <select
               aria-label="Benchmark schema"
@@ -1791,12 +2038,14 @@ function DataDestinationSettings({
             <input aria-label="Benchmark schema" value={schema} onChange={(event) => setSchema(event.target.value)} />
           )}
         </label>
-        <Button
-          disabled={busy || (mode !== 'create-catalog-schema' && loading) || saving || unchanged || !catalog || !schema}
-          onClick={() => void saveDestination()}
-        >
-          {saving ? <RefreshCw className="spin" /> : <ShieldCheck />} Validate and save destination
-        </Button>
+        <Explained title="Validate and save destination" description={HELP.validateDestination}>
+          <Button
+            disabled={busy || (mode !== 'create-catalog-schema' && loading) || saving || unchanged || !catalog || !schema}
+            onClick={() => void saveDestination()}
+          >
+            {saving ? <RefreshCw className="spin" /> : <ShieldCheck />} Validate and save destination
+          </Button>
+        </Explained>
       </div>
       <div className="destination-note">
         <ShieldCheck />
@@ -1893,7 +2142,7 @@ function WarehouseSettings({
       </div>
       <div className="warehouse-picker">
         <label>
-          <span>SQL warehouse</span>
+          <HelpLabel label="SQL warehouse" description={HELP.warehouse} />
           <select
             aria-label="SQL warehouse"
             value={selectedId}
@@ -1916,15 +2165,18 @@ function WarehouseSettings({
         <div className="warehouse-facts">
           <span>
             <b>{selected.clusterSize}</b>
-            <small>size</small>
+            <HelpLabel label="size" description="The configured SQL warehouse cluster size." />
           </span>
           <span>
             <b>{selected.serverless ? 'Serverless' : selected.warehouseType}</b>
-            <small>type</small>
+            <HelpLabel
+              label="type"
+              description="Serverless warehouses start and scale without customer-managed clusters."
+            />
           </span>
           <span>
             <b className={`warehouse-state state-${selected.state.toLowerCase()}`}>{selected.state}</b>
-            <small>state</small>
+            <HelpLabel label="state" description={HELP.warehouseState} />
           </span>
         </div>
         <Button
@@ -2010,7 +2262,10 @@ function HardResetSettings({
         </span>
         <div>
           <span className="section-kicker">Danger zone</span>
-          <h2>Hard reset all test data</h2>
+          <div className="heading-with-help">
+            <h2>Hard reset all test data</h2>
+            <HelpTip label="Hard reset" description={HELP.hardReset} />
+          </div>
           <p>
             Permanently remove Lakebase benchmark rows, the three LakeLoad Delta tables in{' '}
             <code>
@@ -2161,18 +2416,31 @@ function LiveChart({
     <article className="telemetry-chart surface">
       <header>
         <div>
-          <h3>{title}</h3>
+          <div className="heading-with-help compact">
+            <h3>{title}</h3>
+            <HelpTip label={title} description={subtitle} />
+          </div>
           <p>{subtitle}</p>
         </div>
-        <span className={`chart-live ${live ? 'active' : ''}`}>
-          <i /> {live ? '1s LIVE' : 'RECORDED'}
-        </span>
+        <Explained
+          title={live ? 'Live samples' : 'Recorded samples'}
+          description={
+            live
+              ? 'The chart receives a new one-second metric sample while the workload is running.'
+              : 'The chart shows samples stored with the selected benchmark run.'
+          }
+        >
+          <span className={`chart-live ${live ? 'active' : ''}`} tabIndex={0}>
+            <i /> {live ? '1s LIVE' : 'RECORDED'}
+          </span>
+        </Explained>
       </header>
       <div className="chart-legend">
         {series.map((item) => (
           <span key={item.key}>
             <i className={item.tone} />
             {item.label}
+            <HelpTip label={item.label} description={METRIC_HELP[item.key] ?? subtitle} compact />
             <b>{latest ? `${compact(value(latest[item.key]))}${unit}` : '—'}</b>
           </span>
         ))}
@@ -2289,16 +2557,18 @@ function MetricCard({
   label,
   value: displayValue,
   unit,
+  description,
 }: {
   icon: ReactNode;
   label: string;
   value: string;
   unit: string;
+  description: string;
 }) {
   return (
     <div className="metric-card">
       <span className="metric-icon">{icon}</span>
-      <span className="metric-label">{label}</span>
+      <HelpLabel label={label} description={description} className="metric-label" />
       <strong>
         {displayValue}
         <small>{unit}</small>
@@ -2306,11 +2576,19 @@ function MetricCard({
     </div>
   );
 }
-function DataStat({ label, value: displayValue }: { label: string; value: string }) {
+function DataStat({
+  label,
+  value: displayValue,
+  description,
+}: {
+  label: string;
+  value: string;
+  description: string;
+}) {
   return (
     <div>
       <strong>{displayValue}</strong>
-      <span>{label}</span>
+      <HelpLabel label={label} description={description} />
     </div>
   );
 }
@@ -2321,6 +2599,7 @@ function Range({
   max,
   step = 1,
   suffix,
+  help,
   onChange,
 }: {
   label: string;
@@ -2329,12 +2608,16 @@ function Range({
   max: number;
   step?: number;
   suffix: string;
+  help: string;
   onChange: (value: number) => void;
 }) {
   return (
     <label className="range-control">
       <span>
-        <b>{label}</b>
+        <b className="range-label">
+          {label}
+          <HelpTip label={label} description={help} compact />
+        </b>
         <output>
           {current}
           {suffix}
@@ -2370,15 +2653,98 @@ function RailButton({
   children: ReactNode;
 }) {
   return (
-    <button
-      className={`rail-button ${active ? 'active' : ''}`}
-      aria-label={label}
-      aria-current={active ? 'page' : undefined}
-      onClick={onClick}
-    >
-      {children}
-    </button>
+    <Explained title={label} description={navigationHelp(label)}>
+      <button
+        className={`rail-button ${active ? 'active' : ''}`}
+        aria-label={label}
+        aria-current={active ? 'page' : undefined}
+        onClick={onClick}
+      >
+        {children}
+      </button>
+    </Explained>
   );
+}
+
+function HelpTip({
+  label,
+  description,
+  compact = false,
+}: {
+  label: string;
+  description: string;
+  compact?: boolean;
+}) {
+  return (
+    <Tooltip>
+      <TooltipTrigger asChild>
+        <span
+          className={`help-tip ${compact ? 'compact' : ''}`}
+          role="button"
+          tabIndex={0}
+          aria-label={`About ${label}`}
+          onClick={(event) => {
+            event.preventDefault();
+            event.stopPropagation();
+          }}
+        >
+          <CircleHelp />
+        </span>
+      </TooltipTrigger>
+      <TooltipContent className="lakeload-help-tooltip" sideOffset={8} collisionPadding={12}>
+        <strong>{label}</strong>
+        <p>{description}</p>
+      </TooltipContent>
+    </Tooltip>
+  );
+}
+
+function HelpLabel({
+  label,
+  description,
+  className = '',
+}: {
+  label: string;
+  description: string;
+  className?: string;
+}) {
+  return (
+    <span className={`help-label ${className}`.trim()}>
+      {label}
+      <HelpTip label={label} description={description} compact />
+    </span>
+  );
+}
+
+function Explained({
+  title,
+  description,
+  children,
+}: {
+  title: string;
+  description: string;
+  children: ReactNode;
+}) {
+  return (
+    <Tooltip>
+      <TooltipTrigger asChild>{children}</TooltipTrigger>
+      <TooltipContent className="lakeload-help-tooltip" sideOffset={8} collisionPadding={12}>
+        <strong>{title}</strong>
+        <p>{description}</p>
+      </TooltipContent>
+    </Tooltip>
+  );
+}
+
+function navigationHelp(label: string) {
+  const descriptions: Record<string, string> = {
+    'Live telemetry': 'Configure a workload, start or stop load, and inspect one-second Lakebase or DBSQL metrics.',
+    'Compare engines': 'Run controlled Lakebase and DBSQL tests side by side and compare throughput and latency.',
+    'Branch lab': 'Create snapshots and isolated restore branches while the benchmark workload continues.',
+    'Run history': 'Open completed benchmark runs and inspect their recorded metrics.',
+    Settings: 'Prepare data, select Unity Catalog and DBSQL resources, check readiness, or reset the environment.',
+  };
+  return descriptions[label] ?? label;
 }
 function BranchNode({
   type,

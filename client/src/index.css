@@ -1651,14 +1651,16 @@ h3 {
   cursor: not-allowed;
   opacity: 0.6;
 }
-button[data-slot='button']:disabled {
+button[data-slot='button']:disabled,
+button[data-slot='tooltip-trigger']:disabled {
   border: 0.0625rem solid var(--db-navy-600);
   color: var(--db-ink-200);
   background: var(--db-navy-700);
   box-shadow: none;
   opacity: 1;
 }
-button[data-slot='button']:disabled svg {
+button[data-slot='button']:disabled svg,
+button[data-slot='tooltip-trigger']:disabled svg {
   color: var(--db-ink-300);
 }
 .warehouse-facts {
@@ -1909,6 +1911,112 @@ button.history-row:hover {
   margin: 0.2rem 0 0;
   color: var(--db-text-muted);
   font-size: 0.7rem;
+}
+.heading-with-help,
+.badge-with-help,
+.help-label,
+.range-label {
+  min-width: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+}
+.heading-with-help h2,
+.heading-with-help h3 {
+  margin-block: 0;
+}
+.heading-with-help.compact {
+  gap: 0.25rem;
+}
+.help-tip {
+  width: 1.25rem;
+  height: 1.25rem;
+  display: inline-grid;
+  flex: 0 0 auto;
+  place-items: center;
+  border-radius: 50%;
+  outline: none;
+  color: var(--db-text-subtle);
+  cursor: help;
+  transition:
+    color 120ms ease,
+    background 120ms ease;
+}
+.help-tip.compact {
+  width: 1rem;
+  height: 1rem;
+}
+.help-tip svg {
+  width: 0.85rem;
+  height: 0.85rem;
+}
+.help-tip.compact svg {
+  width: 0.72rem;
+  height: 0.72rem;
+}
+.help-tip:hover,
+.help-tip:focus-visible {
+  color: var(--db-info);
+  background: rgb(73 213 231 / 10%);
+  box-shadow: 0 0 0 0.12rem rgb(73 213 231 / 18%);
+}
+.lakeload-help-tooltip {
+  z-index: 1000;
+  width: min(22rem, calc(100vw - 2rem));
+  padding: 0.7rem 0.8rem;
+  border: 0.0625rem solid rgb(73 213 231 / 50%);
+  border-radius: var(--db-radius-md);
+  background: #06171c;
+  color: var(--db-text);
+  box-shadow: 0 0.9rem 2.5rem rgb(0 0 0 / 45%);
+  font-family: var(--db-font-primary);
+}
+.lakeload-help-tooltip strong {
+  display: block;
+  margin-bottom: 0.2rem;
+  color: var(--db-info);
+  font-size: 0.75rem;
+}
+.lakeload-help-tooltip p {
+  margin: 0;
+  color: var(--db-text);
+  font-size: 0.74rem;
+  line-height: 1.5;
+}
+.lakeload-help-tooltip svg {
+  background: #06171c;
+  color: #06171c;
+  fill: #06171c;
+}
+.range-label {
+  color: var(--db-text);
+}
+.metric-label.help-label,
+.comparison-kpis > div > .help-label {
+  display: flex;
+  overflow: visible;
+  text-overflow: clip;
+}
+.chart-legend .help-tip,
+.comparison-kpis .help-tip,
+.core-stats .help-tip,
+.warehouse-facts .help-tip {
+  display: inline-grid;
+  overflow: visible;
+  color: var(--db-text-subtle);
+  white-space: normal;
+}
+.warehouse-facts .help-label {
+  color: var(--db-text-faint);
+  font-size: 0.64rem;
+  text-transform: uppercase;
+}
+.endpoint-detail > .help-label {
+  color: var(--db-text-muted);
+  font-size: 0.63rem;
+}
+.comparison-launch > span > .help-label {
+  color: inherit;
 }
 .confirm-dialog {
   width: min(28rem, calc(100vw - 2rem));
