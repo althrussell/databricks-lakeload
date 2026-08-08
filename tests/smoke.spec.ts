@@ -1,25 +1,7 @@
-import { test, expect } from '@playwright/test';
+import { test, expect, type Locator } from '@playwright/test';
 
-test('LakeLoad renders the workload console', async ({ page }) => {
-  await page.goto('/');
-  await expect(page.getByRole('heading', { name: 'LakeLoad', exact: true })).toBeVisible();
-  await expect(page.getByRole('heading', { name: 'Shape the pressure', exact: true })).toBeVisible();
-  await expect(page.getByRole('button', { name: /Simulate load|Stop load/ })).toBeVisible();
-  await expect(page.getByText('Live database telemetry', { exact: true })).toBeVisible();
-  await page.getByRole('button', { name: 'Branch lab', exact: true }).click();
-  await expect(page.getByRole('button', { name: /Capture snapshot/ })).toBeVisible();
-  await expect(page.getByRole('heading', { name: 'Branch lineage', exact: true })).toBeVisible();
-  await page.getByRole('button', { name: 'Compare engines', exact: true }).click();
-  await expect(page.getByRole('heading', { name: 'Lakebase and DBSQL, side by side', exact: true })).toBeVisible();
-  await expect(page.getByRole('button', { name: /Indexed request serving/ })).toBeVisible();
-  await expect(page.locator('.comparison-lane.lakebase')).toContainText('Lakebase');
-  await expect(page.locator('.comparison-lane.dbsql')).toContainText('DBSQL');
-  await page.getByRole('button', { name: 'Settings', exact: true }).click();
-  await expect(page.getByRole('heading', { name: 'SQL warehouse under test', exact: true })).toBeVisible();
-  await expect(page.getByRole('combobox', { name: 'SQL warehouse' })).toBeVisible();
-  const selectedWarehouse = page.getByRole('button', { name: 'Selected for DBSQL tests', exact: true });
-  await expect(selectedWarehouse).toBeDisabled();
-  const disabledContrast = await selectedWarehouse.evaluate((element) => {
+async function contrastRatio(control: Locator) {
+  return control.evaluate((element) => {
     const style = getComputedStyle(element);
     const luminance = (value: string) => {
       const channels = (value.match(/[\d.]+/g) ?? []).slice(0, 3).map(Number);
@@ -32,7 +14,34 @@ test('LakeLoad renders the workload console', async ({ page }) => {
     const background = luminance(style.backgroundColor);
     return (Math.max(foreground, background) + 0.05) / (Math.min(foreground, background) + 0.05);
   });
-  expect(disabledContrast).toBeGreaterThanOrEqual(4.5);
+}
+
+test('LakeLoad renders the workload console', async ({ page }) => {
+  await page.goto('/');
+  await expect(page.getByRole('heading', { name: 'LakeLoad', exact: true })).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Shape the pressure', exact: true })).toBeVisible();
+  await expect(page.getByRole('button', { name: /Simulate load|Stop load/ })).toBeVisible();
+  await expect(page.getByText('Live database telemetry', { exact: true })).toBeVisible();
+  await page.getByRole('button', { name: 'Branch lab', exact: true }).click();
+  await expect(page.getByRole('button', { name: /Capture snapshot/ })).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Branch lineage', exact: true })).toBeVisible();
+  const restoreBranch = page.getByRole('button', { name: 'Restore isolated branch', exact: true });
+  await restoreBranch.evaluate((element) => {
+    (element as HTMLButtonElement).disabled = true;
+  });
+  await expect(restoreBranch).toBeDisabled();
+  expect(await contrastRatio(restoreBranch)).toBeGreaterThanOrEqual(4.5);
+  await page.getByRole('button', { name: 'Compare engines', exact: true }).click();
+  await expect(page.getByRole('heading', { name: 'Lakebase and DBSQL, side by side', exact: true })).toBeVisible();
+  await expect(page.getByRole('button', { name: /Indexed request serving/ })).toBeVisible();
+  await expect(page.locator('.comparison-lane.lakebase')).toContainText('Lakebase');
+  await expect(page.locator('.comparison-lane.dbsql')).toContainText('DBSQL');
+  await page.getByRole('button', { name: 'Settings', exact: true }).click();
+  await expect(page.getByRole('heading', { name: 'SQL warehouse under test', exact: true })).toBeVisible();
+  await expect(page.getByRole('combobox', { name: 'SQL warehouse' })).toBeVisible();
+  const selectedWarehouse = page.getByRole('button', { name: 'Selected for DBSQL tests', exact: true });
+  await expect(selectedWarehouse).toBeDisabled();
+  expect(await contrastRatio(selectedWarehouse)).toBeGreaterThanOrEqual(4.5);
   await expect(page.getByRole('button', { name: 'Hard reset', exact: true })).toBeVisible();
 });
 
