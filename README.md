@@ -12,6 +12,7 @@ LakeLoad is a real-time OLTP, OLAP, and LTAP benchmark suite for Databricks Lake
 - DBSQL point lookup, large scan/join, and analytical window scenarios
 - readiness and test definitions for CDF, synced tables, Search, OpenTelemetry, and a full closed-loop LTAP flow
 - one-second live charts for workload/database TPS, p50/p95/p99 latency, connections, row churn, workload mix, cache hit rate, and lock waits
+- a persisted Settings selector for choosing and connection-testing the SQL warehouse used by every DBSQL workload
 - copy-on-write snapshots during active load and non-destructive restore into isolated branches with their own compute
 - deterministic PostgreSQL seed data and persistent run history
 - short-lived Lakebase OAuth credentials with automatic pool rotation

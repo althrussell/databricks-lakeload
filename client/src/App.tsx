@@ -119,6 +119,15 @@ interface Readiness {
   detail: string;
 }
 
+interface SqlWarehouse {
+  id: string;
+  name: string;
+  state: string;
+  clusterSize: string;
+  warehouseType: string;
+  serverless: boolean;
+}
+
 interface Overview {
   scenarios: Scenario[];
   runs: Run[];
@@ -128,6 +137,7 @@ interface Overview {
   branches: Branch[];
   branchOperations: BranchOperation[];
   target: { database: string; postgres_version: string; accounts: number; products: number; history_rows: number };
+  sqlWarehouse: SqlWarehouse;
   endpoint: { project: string; branch: string; endpoint: string; poolSize: number; autoscaling: string };
 }
 
@@ -140,6 +150,14 @@ const EMPTY: Overview = {
   branches: [],
   branchOperations: [],
   target: { database: 'databricks_postgres', postgres_version: '17', accounts: 0, products: 0, history_rows: 0 },
+  sqlWarehouse: {
+    id: '',
+    name: 'SQL warehouse not loaded',
+    state: 'UNKNOWN',
+    clusterSize: 'Unknown size',
+    warehouseType: 'Unknown type',
+    serverless: false,
+  },
   endpoint: { project: 'lakeload', branch: 'benchmark', endpoint: 'primary', poolSize: 80, autoscaling: '1–4 CU' },
 };
 
@@ -431,7 +449,7 @@ export default function App() {
           <RailButton label="Run history" active={view === 'runs'} onClick={() => setView('runs')}>
             <History />
           </RailButton>
-          <RailButton label="Setup" active={view === 'setup'} onClick={() => setView('setup')}>
+          <RailButton label="Settings" active={view === 'setup'} onClick={() => setView('setup')}>
             <Settings2 />
           </RailButton>
         </nav>
@@ -519,7 +537,7 @@ export default function App() {
             }}
           />
         ) : (
-          <SetupView overview={overview} busy={busy} onPrepare={prepare} />
+          <SetupView overview={overview} busy={busy} onPrepare={prepare} onWarehouseChanged={refresh} />
         )}
       </main>
     </div>
@@ -965,7 +983,9 @@ function ComparisonView({ overview, onOpenSetup }: { overview: Overview; onOpenS
           <ShieldCheck />
           <span>
             Sequential execution
-            <small>Matched settings without cross-engine interference</small>
+            <small>
+              DBSQL: {overview.sqlWarehouse.name} · {overview.sqlWarehouse.clusterSize}
+            </small>
           </span>
         </div>
       </section>
@@ -1512,25 +1532,29 @@ function SetupView({
   overview,
   busy,
   onPrepare,
+  onWarehouseChanged,
 }: {
   overview: Overview;
   busy: boolean;
   onPrepare: () => Promise<void>;
+  onWarehouseChanged: () => Promise<void>;
 }) {
   return (
     <section className="setup-section surface">
       <div className="setup-hero">
         <div>
-          <span className="section-kicker">One-click benchmark setup</span>
-          <h2>Prepare the benchmark</h2>
+          <span className="section-kicker">Environment settings</span>
+          <h2>Configure and prepare</h2>
           <p>
-            Create deterministic Lakebase and Delta datasets, indexes, and comparison views. This action is idempotent.
+            Choose the DBSQL compute under test, then create deterministic Lakebase and Delta datasets. Preparation is
+            idempotent.
           </p>
         </div>
         <Button size="lg" className="launch-button" disabled={busy} onClick={() => void onPrepare()}>
           {busy ? <RefreshCw className="spin" /> : <Database />} Prepare all data
         </Button>
       </div>
+      <WarehouseSettings overview={overview} busy={busy} onChanged={onWarehouseChanged} />
       <div className="section-heading">
         <div>
           <span className="section-kicker">Environment</span>
@@ -1551,6 +1575,142 @@ function SetupView({
         ))}
       </div>
     </section>
+  );
+}
+
+function WarehouseSettings({
+  overview,
+  busy,
+  onChanged,
+}: {
+  overview: Overview;
+  busy: boolean;
+  onChanged: () => Promise<void>;
+}) {
+  const [warehouses, setWarehouses] = useState<SqlWarehouse[]>([]);
+  const [selectedId, setSelectedId] = useState(overview.sqlWarehouse.id);
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [message, setMessage] = useState<{ kind: 'error' | 'success'; text: string } | null>(null);
+  const selected = warehouses.find((warehouse) => warehouse.id === selectedId) ?? overview.sqlWarehouse;
+
+  useEffect(() => {
+    let cancelled = false;
+    void fetch('/api/lakeload/warehouses')
+      .then(async (response) => {
+        const body = (await response.json()) as {
+          warehouses?: SqlWarehouse[];
+          selectedWarehouseId?: string;
+          error?: string;
+        };
+        if (!response.ok) throw new Error(body.error ?? 'Warehouses could not be loaded.');
+        if (!cancelled) {
+          setWarehouses(body.warehouses ?? []);
+          setSelectedId(body.selectedWarehouseId ?? overview.sqlWarehouse.id);
+        }
+      })
+      .catch((error) => {
+        if (!cancelled) setMessage({ kind: 'error', text: error instanceof Error ? error.message : String(error) });
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [overview.sqlWarehouse.id]);
+
+  async function saveWarehouse() {
+    setSaving(true);
+    setMessage(null);
+    try {
+      const response = await fetch('/api/lakeload/warehouse', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ warehouseId: selectedId }),
+      });
+      const body = (await response.json()) as { message?: string; error?: string };
+      if (!response.ok) throw new Error(body.error ?? 'SQL warehouse could not be selected.');
+      setMessage({ kind: 'success', text: body.message ?? 'DBSQL test warehouse updated.' });
+      await onChanged();
+    } catch (error) {
+      setMessage({ kind: 'error', text: error instanceof Error ? error.message : String(error) });
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <div className="warehouse-settings">
+      <div className="warehouse-settings-copy">
+        <span className="warehouse-icon">
+          <Columns3 />
+        </span>
+        <div>
+          <span className="section-kicker">DBSQL compute target</span>
+          <h2>SQL warehouse under test</h2>
+          <p>Every DBSQL setup query, workload, and side-by-side comparison uses this warehouse.</p>
+        </div>
+      </div>
+      <div className="warehouse-picker">
+        <label>
+          <span>SQL warehouse</span>
+          <select
+            aria-label="SQL warehouse"
+            value={selectedId}
+            disabled={loading || saving || busy || Boolean(overview.activeRunId)}
+            onChange={(event) => {
+              setSelectedId(event.target.value);
+              setMessage(null);
+            }}
+          >
+            {!warehouses.some((warehouse) => warehouse.id === overview.sqlWarehouse.id) && overview.sqlWarehouse.id && (
+              <option value={overview.sqlWarehouse.id}>{overview.sqlWarehouse.name}</option>
+            )}
+            {warehouses.map((warehouse) => (
+              <option key={warehouse.id} value={warehouse.id}>
+                {warehouse.name} · {warehouse.clusterSize} · {warehouse.state.toLowerCase()}
+              </option>
+            ))}
+          </select>
+        </label>
+        <div className="warehouse-facts">
+          <span>
+            <b>{selected.clusterSize}</b>
+            <small>size</small>
+          </span>
+          <span>
+            <b>{selected.serverless ? 'Serverless' : selected.warehouseType}</b>
+            <small>type</small>
+          </span>
+          <span>
+            <b className={`warehouse-state state-${selected.state.toLowerCase()}`}>{selected.state}</b>
+            <small>state</small>
+          </span>
+        </div>
+        <Button
+          onClick={() => void saveWarehouse()}
+          disabled={
+            loading ||
+            saving ||
+            busy ||
+            !selectedId ||
+            selectedId === overview.sqlWarehouse.id ||
+            Boolean(overview.activeRunId)
+          }
+        >
+          {saving ? <RefreshCw className="spin" /> : <Check />} Use for DBSQL tests
+        </Button>
+      </div>
+      <div className="warehouse-access-note">
+        <ShieldCheck />
+        <span>
+          Only warehouses available to the App service principal are listed.
+          <small>Grant the app CAN USE on another warehouse, then reopen Settings to add it.</small>
+        </span>
+      </div>
+      {message && <div className={`warehouse-message ${message.kind}`}>{message.text}</div>}
+    </div>
   );
 }
 

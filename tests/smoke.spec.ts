@@ -14,4 +14,7 @@ test('LakeLoad renders the workload console', async ({ page }) => {
   await expect(page.getByRole('button', { name: /Indexed request serving/ })).toBeVisible();
   await expect(page.locator('.comparison-lane.lakebase')).toContainText('Lakebase');
   await expect(page.locator('.comparison-lane.dbsql')).toContainText('DBSQL');
+  await page.getByRole('button', { name: 'Settings', exact: true }).click();
+  await expect(page.getByRole('heading', { name: 'SQL warehouse under test', exact: true })).toBeVisible();
+  await expect(page.getByRole('combobox', { name: 'SQL warehouse' })).toBeVisible();
 });

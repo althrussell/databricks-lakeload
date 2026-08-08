@@ -4,6 +4,7 @@ import { z } from 'zod';
 import { DbsqlEngine, type DbsqlRunConfig } from '../../lakeload/dbsql-engine';
 import { LoadEngine, type RunConfig } from '../../lakeload/engine';
 import { SCENARIOS, scenarioById, type ScenarioId } from '../../lakeload/scenarios';
+import { WarehouseAnalyticsClient } from '../../lakeload/warehouse-analytics';
 
 interface Queryable {
   query(text: string, params?: unknown[]): Promise<{ rows: Record<string, unknown>[] }>;
@@ -13,6 +14,15 @@ interface AppKitServices {
   lakebase: Queryable;
   analytics: { query(text: string, parameters?: Record<string, unknown>): Promise<unknown> };
   server: { extend(fn: (app: Application) => void): void };
+}
+
+interface SqlWarehouse {
+  id: string;
+  name: string;
+  state: string;
+  clusterSize: string;
+  warehouseType: string;
+  serverless: boolean;
 }
 
 const RunRequest = z.object({
@@ -29,6 +39,10 @@ const BranchRequest = z.object({
   sourceBranch: z.string().regex(/^projects\/[a-z0-9-]+\/branches\/[a-z0-9-]+$/),
   branchId: z.string().regex(/^[a-z][a-z0-9-]{0,62}$/),
   createCompute: z.boolean().default(false),
+});
+
+const WarehouseRequest = z.object({
+  warehouseId: z.string().regex(/^[a-zA-Z0-9-]{1,128}$/),
 });
 
 const CONTROL_SCHEMA_SQL = `
@@ -72,6 +86,10 @@ const CONTROL_SCHEMA_SQL = `
     create_compute BOOLEAN NOT NULL DEFAULT FALSE, status TEXT NOT NULL DEFAULT 'queued',
     message TEXT, requested_by TEXT NOT NULL, created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     completed_at TIMESTAMPTZ
+  );
+  CREATE TABLE IF NOT EXISTS lakeload_control.app_setting (
+    id INTEGER PRIMARY KEY CHECK (id = 1), sql_warehouse_id TEXT NOT NULL,
+    updated_by TEXT NOT NULL, updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
   );
 `;
 
@@ -138,9 +156,21 @@ export async function setupLakeLoadRoutes(appkit: AppKitServices) {
      WHERE status IN ('queued','running')`
   );
   const endpoint = process.env.TARGET_LAKEBASE_ENDPOINT;
+  const defaultWarehouseId = process.env.DATABRICKS_WAREHOUSE_ID;
   let host = process.env.TARGET_PGHOST;
   const database = process.env.TARGET_PGDATABASE ?? 'databricks_postgres';
   if (!endpoint) throw new Error('TARGET_LAKEBASE_ENDPOINT is required');
+  if (!defaultWarehouseId) throw new Error('DATABRICKS_WAREHOUSE_ID is required');
+  await appkit.lakebase.query(
+    `INSERT INTO lakeload_control.app_setting(id,sql_warehouse_id,updated_by)
+     VALUES(1,$1,'deployment default') ON CONFLICT(id) DO NOTHING`,
+    [defaultWarehouseId]
+  );
+  const storedSettings = await appkit.lakebase.query(
+    'SELECT sql_warehouse_id FROM lakeload_control.app_setting WHERE id=1'
+  );
+  const storedWarehouseId = storedSettings.rows[0]?.sql_warehouse_id;
+  let selectedWarehouseId = typeof storedWarehouseId === 'string' ? storedWarehouseId : defaultWarehouseId;
   const projectName = endpoint.split('/').slice(0, 2).join('/');
   const projectId = projectName.split('/')[1];
   const workspaceClient = getWorkspaceClient({});
@@ -154,6 +184,7 @@ export async function setupLakeLoadRoutes(appkit: AppKitServices) {
     host = endpointResource.status?.hosts?.host;
   }
   if (!host) throw new Error(`Lakebase host could not be resolved for ${endpoint}`);
+  const warehouseAnalytics = new WarehouseAnalyticsClient(workspaceClient.apiClient, () => selectedWarehouseId);
   const targetPool = createLakebasePool({
     endpoint,
     host,
@@ -167,9 +198,25 @@ export async function setupLakeLoadRoutes(appkit: AppKitServices) {
   });
   await prepareLakebase(targetPool);
   const lakebaseEngine = new LoadEngine(targetPool, appkit.lakebase);
-  const dbsqlEngine = new DbsqlEngine(appkit.analytics, appkit.lakebase);
+  const dbsqlEngine = new DbsqlEngine(warehouseAnalytics, appkit.lakebase);
   let readinessCache: { updatedAt: number; value: Awaited<ReturnType<typeof getReadiness>> } | null = null;
   let branchesCache: Record<string, unknown>[] = [];
+  let warehousesCache: { updatedAt: number; value: SqlWarehouse[] } | null = null;
+
+  async function getWarehouses(force = false) {
+    if (!force && warehousesCache && Date.now() - warehousesCache.updatedAt < 60_000) return warehousesCache.value;
+    const response = await workspaceClient.apiClient.request({
+      path: '/api/2.0/sql/warehouses',
+      method: 'GET',
+      headers: new Headers(),
+      raw: false,
+    });
+    const value = collectionRows(response, 'warehouses')
+      .map(toSqlWarehouse)
+      .filter((item) => item.id);
+    warehousesCache = { updatedAt: Date.now(), value };
+    return value;
+  }
 
   const pendingOperations = await appkit.lakebase.query(
     `SELECT id, operation_name, phase, branch_name, create_compute FROM lakeload_control.branch_operation
@@ -204,8 +251,21 @@ export async function setupLakeLoadRoutes(appkit: AppKitServices) {
           console.warn('[lakeload] branch topology refresh failed; serving the last known topology', error);
         }
         if (!readinessCache || Date.now() - readinessCache.updatedAt > 30_000) {
-          readinessCache = { updatedAt: Date.now(), value: await getReadiness(targetPool, appkit.analytics) };
+          readinessCache = {
+            updatedAt: Date.now(),
+            value: await getReadiness(targetPool, warehouseAnalytics, selectedWarehouseId),
+          };
         }
+        const selectedWarehouse = (await getWarehouses().catch(() => [])).find(
+          (warehouse) => warehouse.id === selectedWarehouseId
+        ) ?? {
+          id: selectedWarehouseId,
+          name: selectedWarehouseId,
+          state: 'UNKNOWN',
+          clusterSize: 'Unknown size',
+          warehouseType: 'Unknown type',
+          serverless: false,
+        };
         const activeId = lakebaseEngine.activeRunId ?? dbsqlEngine.activeRunId;
         const metrics = activeId ? await metricsFor(appkit.lakebase, activeId) : { rows: [] };
         res.json({
@@ -217,6 +277,7 @@ export async function setupLakeLoadRoutes(appkit: AppKitServices) {
           readiness: readinessCache.value,
           branches: branchesCache,
           branchOperations: operations.rows,
+          sqlWarehouse: selectedWarehouse,
           endpoint: {
             project: projectId,
             branch: endpoint.split('/')[3] ?? 'benchmark',
@@ -231,16 +292,52 @@ export async function setupLakeLoadRoutes(appkit: AppKitServices) {
       }
     });
 
+    app.get('/api/lakeload/warehouses', async (_req, res) => {
+      try {
+        const warehouses = await getWarehouses(true);
+        res.json({ warehouses, selectedWarehouseId });
+      } catch (error) {
+        res.status(500).json({ error: `Warehouses could not be listed: ${errorMessage(error)}` });
+      }
+    });
+
+    app.post('/api/lakeload/warehouse', async (req, res) => {
+      const parsed = WarehouseRequest.safeParse(req.body);
+      if (!parsed.success) return void res.status(400).json({ error: 'Invalid SQL warehouse ID' });
+      if (lakebaseEngine.activeRunId || dbsqlEngine.activeRunId)
+        return void res.status(409).json({ error: 'Stop the active benchmark before changing SQL warehouse' });
+      try {
+        const warehouses = await getWarehouses(true);
+        const selected = warehouses.find((warehouse) => warehouse.id === parsed.data.warehouseId);
+        if (!selected)
+          return void res.status(403).json({
+            error: 'The App service principal cannot access that warehouse. Grant it CAN USE, then refresh the list.',
+          });
+        await warehouseAnalytics.queryWarehouse(selected.id, 'SELECT 1 AS lakeload_connection_test');
+        await appkit.lakebase.query(
+          `INSERT INTO lakeload_control.app_setting(id,sql_warehouse_id,updated_by,updated_at)
+           VALUES(1,$1,$2,NOW()) ON CONFLICT(id) DO UPDATE SET
+           sql_warehouse_id=EXCLUDED.sql_warehouse_id,updated_by=EXCLUDED.updated_by,updated_at=NOW()`,
+          [selected.id, actor(req)]
+        );
+        selectedWarehouseId = selected.id;
+        readinessCache = null;
+        res.json({ warehouse: selected, message: `${selected.name} is now the DBSQL test warehouse.` });
+      } catch (error) {
+        res.status(500).json({ error: `Warehouse connection test failed: ${errorMessage(error)}` });
+      }
+    });
+
     app.post('/api/lakeload/setup', async (req, res) => {
       try {
         await prepareLakebase(targetPool);
         await prepareLakebaseAnalyticalHistory(targetPool);
-        for (const statement of DBSQL_SETUP) await appkit.analytics.query(statement);
+        for (const statement of DBSQL_SETUP) await warehouseAnalytics.query(statement);
         const notebookPrincipal = actor(req);
         if (notebookPrincipal !== 'local-operator') {
           const quotedPrincipal = notebookPrincipal.replace(/`/g, '``');
-          await appkit.analytics.query(`GRANT USE SCHEMA ON SCHEMA main.lakeload TO \`${quotedPrincipal}\``);
-          await appkit.analytics.query(`GRANT SELECT ON SCHEMA main.lakeload TO \`${quotedPrincipal}\``);
+          await warehouseAnalytics.query(`GRANT USE SCHEMA ON SCHEMA main.lakeload TO \`${quotedPrincipal}\``);
+          await warehouseAnalytics.query(`GRANT SELECT ON SCHEMA main.lakeload TO \`${quotedPrincipal}\``);
         }
         res.json({ status: 'ready', message: 'Lakebase and Delta benchmark datasets are ready.' });
       } catch (error) {
@@ -376,6 +473,10 @@ export async function setupLakeLoadRoutes(appkit: AppKitServices) {
               catalog: 'main',
               schema: 'lakeload',
               endpoint: endpoint.split('/').slice(-1)[0],
+              sql_warehouse_id: selectedWarehouseId,
+              sql_warehouse_name:
+                warehousesCache?.value.find((warehouse) => warehouse.id === selectedWarehouseId)?.name ??
+                selectedWarehouseId,
             }),
           ]
         );
@@ -451,6 +552,17 @@ function booleanField(value: unknown) {
 
 function stringField(value: unknown, fallback = '') {
   return typeof value === 'string' || typeof value === 'number' ? String(value) : fallback;
+}
+
+function toSqlWarehouse(row: Record<string, unknown>): SqlWarehouse {
+  return {
+    id: stringField(row.id),
+    name: stringField(row.name, stringField(row.id)),
+    state: stringField(row.state, 'UNKNOWN'),
+    clusterSize: stringField(row.cluster_size, 'Unknown size'),
+    warehouseType: stringField(row.warehouse_type, 'Unknown type'),
+    serverless: booleanField(row.enable_serverless_compute),
+  };
 }
 
 async function monitorBranchOperation(
@@ -577,7 +689,7 @@ async function prepareLakebaseAnalyticalHistory(target: Queryable) {
   await target.query('ANALYZE lakeload_bench.history');
 }
 
-async function getReadiness(target: Queryable, analytics: AppKitServices['analytics']) {
+async function getReadiness(target: Queryable, analytics: AppKitServices['analytics'], warehouseId?: string) {
   const checks = await target.query(`SELECT
     current_user AS pg_user,
     EXISTS(SELECT 1 FROM pg_extension WHERE extname='wal2delta') AS cdf_installed,
@@ -588,7 +700,7 @@ async function getReadiness(target: Queryable, analytics: AppKitServices['analyt
     FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
     WHERE n.nspname='lakeload_bench' AND c.relkind='r'`);
   let dbsqlReady = true;
-  let dbsqlDetail = 'Warehouse connected';
+  let dbsqlDetail = warehouseId ? `Warehouse ${warehouseId} connected` : 'Warehouse connected';
   try {
     await analytics.query('SELECT 1 AS ready');
   } catch (error) {

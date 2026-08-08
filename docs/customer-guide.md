@@ -39,7 +39,9 @@ python scripts/bootstrap.py \
 
 The installer is idempotent. It creates or reuses the Lakebase project, benchmark branch, 1–4 CU endpoint, app, jobs, and resource grants. It prints the App URL when deployment succeeds.
 
-Open the App, select **Setup**, then select **Prepare all data**. The App service principal creates its PostgreSQL schemas and the `main.lakeload` Unity Catalog schema. This operation can take several minutes the first time because it creates five million deterministic fact rows in both Lakebase and Delta.
+Open the App and select **Settings**. Under **SQL warehouse under test**, choose the DBSQL warehouse for the benchmark and select **Use for DBSQL tests**. LakeLoad runs a connection test before persisting the choice. Then select **Prepare all data**. The App service principal creates its PostgreSQL schemas and the `main.lakeload` Unity Catalog schema. This operation can take several minutes the first time because it creates five million deterministic fact rows in both Lakebase and Delta.
+
+The selector lists warehouses visible to the App service principal. The warehouse declared during installation is available automatically. To test another warehouse, grant the LakeLoad App service principal `CAN USE` on it and reopen Settings. The selected ID is persisted in the control database, included in every run manifest, and used for DBSQL setup, standalone workloads, and paired comparisons.
 
 ### Why installation has a bootstrap command
 
@@ -289,6 +291,8 @@ The App UI uses these routes, which are also useful for a smoke harness:
 
 ```text
 GET    /api/lakeload/overview
+GET    /api/lakeload/warehouses
+POST   /api/lakeload/warehouse
 POST   /api/lakeload/setup
 POST   /api/lakeload/runs
 GET    /api/lakeload/runs/{run_id}
@@ -327,7 +331,7 @@ A restore request uses `kind: "restore"`, the full snapshot resource name as `so
 
 ## Troubleshooting
 
-- **DBSQL readiness is blocked:** confirm the `sql-warehouse` App resource exists and the App service principal has `CAN_USE`. Start the warehouse once before setup.
+- **DBSQL readiness is blocked:** open Settings and confirm the selected warehouse. The `sql-warehouse` App resource or an explicit grant must give the App service principal `CAN USE`. LakeLoad starts serverless warehouses through the first statement; start a non-serverless warehouse if its policy requires it.
 - **Unity Catalog setup stops:** grant `USE CATALOG` and `CREATE SCHEMA` on the selected catalog to the App service principal. The bootstrap installer performs this grant when the installer identity is authorized.
 - **Lakebase authentication fails:** confirm both Postgres App resources use `CAN_CONNECT_AND_CREATE` and the endpoint is active.
 - **A run fails after App restart:** the App marks interrupted runs failed. Launch a new run; the immutable prior manifest stays in history.
