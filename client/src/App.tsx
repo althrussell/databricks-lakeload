@@ -128,6 +128,16 @@ interface SqlWarehouse {
   serverless: boolean;
 }
 
+interface ResetOperation {
+  id: string;
+  status: 'queued' | 'running' | 'completed' | 'failed';
+  message: string;
+  branch_count: number;
+  requested_by: string;
+  created_at: string;
+  completed_at: string | null;
+}
+
 interface Overview {
   scenarios: Scenario[];
   runs: Run[];
@@ -136,6 +146,7 @@ interface Overview {
   readiness: Readiness[];
   branches: Branch[];
   branchOperations: BranchOperation[];
+  resetOperation: ResetOperation | null;
   target: { database: string; postgres_version: string; accounts: number; products: number; history_rows: number };
   sqlWarehouse: SqlWarehouse;
   endpoint: { project: string; branch: string; endpoint: string; poolSize: number; autoscaling: string };
@@ -149,6 +160,7 @@ const EMPTY: Overview = {
   readiness: [],
   branches: [],
   branchOperations: [],
+  resetOperation: null,
   target: { database: 'databricks_postgres', postgres_version: '17', accounts: 0, products: 0, history_rows: 0 },
   sqlWarehouse: {
     id: '',
@@ -291,7 +303,11 @@ export default function App() {
         selectedRunRef.current = body.activeRunId;
         setSelectedRunId(body.activeRunId);
         setMetrics(body.activeMetrics.map(normalizeMetric));
-      } else if (!selectedRunRef.current && body.runs[0]) {
+      } else if (body.runs.length === 0) {
+        selectedRunRef.current = null;
+        setSelectedRunId(null);
+        setMetrics([]);
+      } else if (!selectedRunRef.current || !body.runs.some((run) => run.id === selectedRunRef.current)) {
         selectedRunRef.current = body.runs[0].id;
         setSelectedRunId(body.runs[0].id);
       }
@@ -1574,6 +1590,7 @@ function SetupView({
           </article>
         ))}
       </div>
+      <HardResetSettings overview={overview} busy={busy} onChanged={onWarehouseChanged} />
     </section>
   );
 }
@@ -1710,6 +1727,125 @@ function WarehouseSettings({
         </span>
       </div>
       {message && <div className={`warehouse-message ${message.kind}`}>{message.text}</div>}
+    </div>
+  );
+}
+
+function HardResetSettings({
+  overview,
+  busy,
+  onChanged,
+}: {
+  overview: Overview;
+  busy: boolean;
+  onChanged: () => Promise<void>;
+}) {
+  const [open, setOpen] = useState(false);
+  const [confirmation, setConfirmation] = useState('');
+  const [submitting, setSubmitting] = useState(false);
+  const [error, setError] = useState('');
+  const reset = overview.resetOperation;
+  const resetActive = reset?.status === 'queued' || reset?.status === 'running';
+
+  async function hardReset() {
+    setSubmitting(true);
+    setError('');
+    try {
+      const response = await fetch('/api/lakeload/hard-reset', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ confirmation }),
+      });
+      const body = (await response.json()) as { resetId?: string; error?: string };
+      if (!response.ok || !body.resetId) throw new Error(body.error ?? 'Hard reset could not start.');
+      setOpen(false);
+      setConfirmation('');
+      await onChanged();
+    } catch (resetError) {
+      setError(resetError instanceof Error ? resetError.message : String(resetError));
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
+  return (
+    <div className="danger-zone">
+      <div className="danger-zone-copy">
+        <span className="danger-icon">
+          <Trash2 />
+        </span>
+        <div>
+          <span className="section-kicker">Danger zone</span>
+          <h2>Hard reset all test data</h2>
+          <p>
+            Permanently remove Lakebase and Delta benchmark rows, run history, telemetry, and every LakeLoad
+            snapshot/restore branch.
+          </p>
+          <small>The Lakebase project, benchmark branch, app deployment, and selected warehouse are preserved.</small>
+        </div>
+      </div>
+      {reset && (
+        <div className={`reset-status status-${reset.status}`} role="status">
+          {resetActive ? <RefreshCw className="spin" /> : reset.status === 'completed' ? <Check /> : <CircleAlert />}
+          <span>
+            <b>{reset.status === 'completed' ? 'Ready for a clean start' : `Reset ${reset.status}`}</b>
+            <small>{reset.message}</small>
+          </span>
+        </div>
+      )}
+      <Button
+        variant="destructive"
+        disabled={busy || resetActive || Boolean(overview.activeRunId)}
+        onClick={() => {
+          setError('');
+          setOpen(true);
+        }}
+      >
+        <Trash2 /> Hard reset
+      </Button>
+      <dialog open={open} className="confirm-dialog hard-reset-dialog" onCancel={() => setOpen(false)}>
+        <span className="section-kicker">Permanent deletion</span>
+        <h3>Reset LakeLoad to an empty state?</h3>
+        <p>This deletes:</p>
+        <ul>
+          <li>
+            All rows in the dedicated <code>lakeload_bench</code> PostgreSQL schema
+          </li>
+          <li>
+            The dedicated <code>main.lakeload</code> Delta schema
+          </li>
+          <li>All benchmark runs, metrics, snapshots, and restore branches</li>
+        </ul>
+        <p>
+          Type <code>RESET LAKELOAD</code> to continue. This cannot be undone.
+        </p>
+        <input
+          aria-label="Hard reset confirmation"
+          autoComplete="off"
+          value={confirmation}
+          onChange={(event) => setConfirmation(event.target.value)}
+          placeholder="RESET LAKELOAD"
+        />
+        {error && <div className="reset-error">{error}</div>}
+        <div>
+          <Button
+            variant="outline"
+            onClick={() => {
+              setOpen(false);
+              setConfirmation('');
+            }}
+          >
+            Cancel
+          </Button>
+          <Button
+            variant="destructive"
+            disabled={confirmation !== 'RESET LAKELOAD' || submitting}
+            onClick={() => void hardReset()}
+          >
+            {submitting ? <RefreshCw className="spin" /> : <Trash2 />} Delete all test data
+          </Button>
+        </div>
+      </dialog>
     </div>
   );
 }

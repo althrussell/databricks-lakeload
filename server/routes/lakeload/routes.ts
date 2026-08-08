@@ -45,6 +45,10 @@ const WarehouseRequest = z.object({
   warehouseId: z.string().regex(/^[a-zA-Z0-9-]{1,128}$/),
 });
 
+const HardResetRequest = z.object({
+  confirmation: z.literal('RESET LAKELOAD'),
+});
+
 const CONTROL_SCHEMA_SQL = `
   CREATE SCHEMA IF NOT EXISTS lakeload_control;
   CREATE TABLE IF NOT EXISTS lakeload_control.run (
@@ -90,6 +94,11 @@ const CONTROL_SCHEMA_SQL = `
   CREATE TABLE IF NOT EXISTS lakeload_control.app_setting (
     id INTEGER PRIMARY KEY CHECK (id = 1), sql_warehouse_id TEXT NOT NULL,
     updated_by TEXT NOT NULL, updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+  );
+  CREATE TABLE IF NOT EXISTS lakeload_control.reset_operation (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(), status TEXT NOT NULL DEFAULT 'queued',
+    message TEXT NOT NULL DEFAULT 'Reset queued', branch_count INTEGER NOT NULL DEFAULT 0,
+    requested_by TEXT NOT NULL, created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), completed_at TIMESTAMPTZ
   );
 `;
 
@@ -155,6 +164,11 @@ export async function setupLakeLoadRoutes(appkit: AppKitServices) {
     `UPDATE lakeload_control.run SET status='failed', completed_at=NOW(), error_message='App restarted during run'
      WHERE status IN ('queued','running')`
   );
+  await appkit.lakebase.query(
+    `UPDATE lakeload_control.reset_operation SET status='failed', completed_at=NOW(),
+     message='App restarted during hard reset; run it again to finish cleanup'
+     WHERE status IN ('queued','running')`
+  );
   const endpoint = process.env.TARGET_LAKEBASE_ENDPOINT;
   const defaultWarehouseId = process.env.DATABRICKS_WAREHOUSE_ID;
   let host = process.env.TARGET_PGHOST;
@@ -196,9 +210,12 @@ export async function setupLakeLoadRoutes(appkit: AppKitServices) {
     telemetry: true,
     logger: { error: true, warn: true },
   });
-  await prepareLakebase(targetPool);
+  await ensureLakebaseBenchmarkSchema(targetPool);
   const lakebaseEngine = new LoadEngine(targetPool, appkit.lakebase);
   const dbsqlEngine = new DbsqlEngine(warehouseAnalytics, appkit.lakebase);
+  let resetActiveId: string | null = null;
+  let resetStarting = false;
+  const resetBusy = () => resetStarting || Boolean(resetActiveId);
   let readinessCache: { updatedAt: number; value: Awaited<ReturnType<typeof getReadiness>> } | null = null;
   let branchesCache: Record<string, unknown>[] = [];
   let warehousesCache: { updatedAt: number; value: SqlWarehouse[] } | null = null;
@@ -218,9 +235,63 @@ export async function setupLakeLoadRoutes(appkit: AppKitServices) {
     return value;
   }
 
+  async function performHardReset(resetId: string) {
+    try {
+      await updateReset(appkit.lakebase, resetId, 'running', 'Removing the Delta benchmark schema');
+      await warehouseAnalytics.query('DROP SCHEMA IF EXISTS main.lakeload CASCADE');
+
+      const branches = branchRows(
+        await postgresRequest(workspaceClient, `/api/2.0/postgres/${projectName}/branches`, 'GET')
+      ).filter(isLakeLoadTestBranch);
+      await appkit.lakebase.query(
+        `UPDATE lakeload_control.reset_operation SET branch_count=$2,
+         message=$3 WHERE id=$1`,
+        [resetId, branches.length, `Purging ${branches.length} LakeLoad snapshot and restore branches`]
+      );
+      await purgeLakeLoadTestBranches(workspaceClient, projectName, branches, async (message) => {
+        await appkit.lakebase.query('UPDATE lakeload_control.reset_operation SET message=$2 WHERE id=$1', [
+          resetId,
+          message,
+        ]);
+      });
+
+      await updateReset(appkit.lakebase, resetId, 'running', 'Clearing Lakebase benchmark tables');
+      await targetPool.query(
+        `TRUNCATE TABLE lakeload_bench.orders,lakeload_bench.history,lakeload_bench.product,
+         lakeload_bench.account,lakeload_bench.dataset_marker RESTART IDENTITY CASCADE`
+      );
+
+      await updateReset(appkit.lakebase, resetId, 'running', 'Clearing run history and telemetry');
+      await appkit.lakebase.query(
+        `TRUNCATE TABLE lakeload_control.run_metric,lakeload_control.run,
+         lakeload_control.branch_operation RESTART IDENTITY CASCADE`
+      );
+      await appkit.lakebase.query(
+        `UPDATE lakeload_control.reset_operation SET status='completed',
+         message='Hard reset complete. Prepare all data to start clean tests.',completed_at=NOW() WHERE id=$1`,
+        [resetId]
+      );
+      branchesCache = [];
+      readinessCache = null;
+    } catch (error) {
+      console.error('[lakeload] hard reset failed', error);
+      await appkit.lakebase.query(
+        `UPDATE lakeload_control.reset_operation SET status='failed',message=$2,completed_at=NOW() WHERE id=$1`,
+        [resetId, `Hard reset stopped: ${errorMessage(error)}`]
+      );
+    } finally {
+      resetActiveId = null;
+    }
+  }
+
   const pendingOperations = await appkit.lakebase.query(
     `SELECT id, operation_name, phase, branch_name, create_compute FROM lakeload_control.branch_operation
      WHERE status IN ('queued','running') AND operation_name IS NOT NULL`
+  );
+  await appkit.lakebase.query(
+    `UPDATE lakeload_control.branch_operation SET status='failed',completed_at=NOW(),
+     message='App restarted before Lakebase operation tracking began; retry the branch action'
+     WHERE status='queued' AND operation_name IS NULL`
   );
   for (const operation of pendingOperations.rows) {
     void monitorBranchOperation(appkit.lakebase, workspaceClient, operation).catch((error) =>
@@ -231,7 +302,7 @@ export async function setupLakeLoadRoutes(appkit: AppKitServices) {
   appkit.server.extend((app) => {
     app.get('/api/lakeload/overview', async (_req, res) => {
       try {
-        const [runs, target, operations] = await Promise.all([
+        const [runs, target, operations, resets] = await Promise.all([
           appkit.lakebase.query(`${RUN_SELECT} ORDER BY created_at DESC LIMIT 50`),
           targetPool.query(`SELECT current_database() AS database, current_setting('server_version') AS postgres_version,
             (SELECT COUNT(*)::int FROM lakeload_bench.account) AS accounts,
@@ -240,6 +311,10 @@ export async function setupLakeLoadRoutes(appkit: AppKitServices) {
           appkit.lakebase.query(
             `SELECT id,kind,branch_name,source_branch,phase,create_compute,status,message,requested_by,
                     created_at,completed_at FROM lakeload_control.branch_operation ORDER BY created_at DESC LIMIT 20`
+          ),
+          appkit.lakebase.query(
+            `SELECT id,status,message,branch_count,requested_by,created_at,completed_at
+             FROM lakeload_control.reset_operation ORDER BY created_at DESC LIMIT 1`
           ),
         ]);
         try {
@@ -277,6 +352,7 @@ export async function setupLakeLoadRoutes(appkit: AppKitServices) {
           readiness: readinessCache.value,
           branches: branchesCache,
           branchOperations: operations.rows,
+          resetOperation: resets.rows[0] ?? null,
           sqlWarehouse: selectedWarehouse,
           endpoint: {
             project: projectId,
@@ -301,9 +377,45 @@ export async function setupLakeLoadRoutes(appkit: AppKitServices) {
       }
     });
 
+    app.post('/api/lakeload/hard-reset', async (req, res) => {
+      const parsed = HardResetRequest.safeParse(req.body);
+      if (!parsed.success)
+        return void res.status(400).json({ error: 'Type RESET LAKELOAD exactly to confirm the hard reset' });
+      if (resetBusy()) return void res.status(409).json({ error: 'A hard reset is already in progress' });
+      if (lakebaseEngine.activeRunId || dbsqlEngine.activeRunId)
+        return void res.status(409).json({ error: 'Stop the active benchmark before hard reset' });
+      resetStarting = true;
+      try {
+        await appkit.lakebase.query(
+          `UPDATE lakeload_control.branch_operation SET status='failed',completed_at=NOW(),
+           message='Branch request did not return a trackable Lakebase operation; retry the branch action'
+           WHERE status='queued' AND operation_name IS NULL AND created_at < NOW() - INTERVAL '5 minutes'`
+        );
+        const branchWork = await appkit.lakebase.query(
+          `SELECT 1 FROM lakeload_control.branch_operation WHERE status IN ('queued','running') LIMIT 1`
+        );
+        if (branchWork.rows.length > 0)
+          return void res.status(409).json({ error: 'Wait for the active branch operation before hard reset' });
+        const created = await appkit.lakebase.query(
+          `INSERT INTO lakeload_control.reset_operation(status,message,requested_by)
+           VALUES('queued','Hard reset queued',$1) RETURNING id`,
+          [actor(req)]
+        );
+        resetActiveId = String(created.rows[0].id);
+        void performHardReset(resetActiveId);
+        res.status(202).json({ resetId: resetActiveId, status: 'queued' });
+      } catch (error) {
+        resetActiveId = null;
+        res.status(500).json({ error: `Hard reset could not start: ${errorMessage(error)}` });
+      } finally {
+        resetStarting = false;
+      }
+    });
+
     app.post('/api/lakeload/warehouse', async (req, res) => {
       const parsed = WarehouseRequest.safeParse(req.body);
       if (!parsed.success) return void res.status(400).json({ error: 'Invalid SQL warehouse ID' });
+      if (resetBusy()) return void res.status(409).json({ error: 'Hard reset is in progress' });
       if (lakebaseEngine.activeRunId || dbsqlEngine.activeRunId)
         return void res.status(409).json({ error: 'Stop the active benchmark before changing SQL warehouse' });
       try {
@@ -329,6 +441,7 @@ export async function setupLakeLoadRoutes(appkit: AppKitServices) {
     });
 
     app.post('/api/lakeload/setup', async (req, res) => {
+      if (resetBusy()) return void res.status(409).json({ error: 'Hard reset is in progress' });
       try {
         await prepareLakebase(targetPool);
         await prepareLakebaseAnalyticalHistory(targetPool);
@@ -346,6 +459,7 @@ export async function setupLakeLoadRoutes(appkit: AppKitServices) {
     });
 
     app.post('/api/lakeload/branches', async (req, res) => {
+      if (resetBusy()) return void res.status(409).json({ error: 'Hard reset is in progress' });
       const parsed = BranchRequest.safeParse(req.body);
       if (!parsed.success)
         return void res.status(400).json({ error: 'Invalid branch request', issues: parsed.error.issues });
@@ -370,6 +484,7 @@ export async function setupLakeLoadRoutes(appkit: AppKitServices) {
            VALUES($1,$2,$3,$4,$5) RETURNING id`,
           [input.kind, branchName, input.sourceBranch, input.createCompute, actor(req)]
         );
+        operationId = String(created.rows[0].id);
         const operation = await postgresRequest(
           workspaceClient,
           `/api/2.0/postgres/${projectName}/branches`,
@@ -383,7 +498,6 @@ export async function setupLakeLoadRoutes(appkit: AppKitServices) {
           }
         );
         const operationName = operationNameFrom(operation);
-        operationId = String(created.rows[0].id);
         await appkit.lakebase.query(
           `UPDATE lakeload_control.branch_operation SET status='running',operation_name=$2,message=$3 WHERE id=$1`,
           [
@@ -412,6 +526,7 @@ export async function setupLakeLoadRoutes(appkit: AppKitServices) {
     });
 
     app.delete('/api/lakeload/branches/:branchId', async (req, res) => {
+      if (resetBusy()) return void res.status(409).json({ error: 'Hard reset is in progress' });
       const branchId = req.params.branchId;
       if (!/^(snapshot|restore)-[a-z0-9-]+$/.test(branchId))
         return void res.status(400).json({ error: 'Only LakeLoad snapshot and restore branches can be removed here' });
@@ -442,6 +557,7 @@ export async function setupLakeLoadRoutes(appkit: AppKitServices) {
     });
 
     app.post('/api/lakeload/runs', async (req, res) => {
+      if (resetBusy()) return void res.status(409).json({ error: 'Hard reset is in progress' });
       const parsed = RunRequest.safeParse(req.body);
       if (!parsed.success)
         return void res.status(400).json({ error: 'Invalid run configuration', issues: parsed.error.issues });
@@ -565,6 +681,60 @@ function toSqlWarehouse(row: Record<string, unknown>): SqlWarehouse {
   };
 }
 
+function lakeLoadTestBranchId(branch: Record<string, unknown>) {
+  const status = branch.status && typeof branch.status === 'object' ? (branch.status as Record<string, unknown>) : {};
+  return stringField(status.branch_id, stringField(branch.name).split('/').slice(-1)[0] ?? '');
+}
+
+export function isLakeLoadTestBranch(branch: Record<string, unknown>) {
+  return /^(snapshot|restore)-[a-z0-9-]+$/.test(lakeLoadTestBranchId(branch));
+}
+
+async function purgeLakeLoadTestBranches(
+  workspaceClient: WorkspaceClient,
+  projectName: string,
+  branches: Record<string, unknown>[],
+  onProgress: (message: string) => Promise<void>
+) {
+  const ordered = [...branches].sort((left, right) => {
+    const leftRestore = lakeLoadTestBranchId(left).startsWith('restore-') ? 0 : 1;
+    const rightRestore = lakeLoadTestBranchId(right).startsWith('restore-') ? 0 : 1;
+    return leftRestore - rightRestore;
+  });
+  for (let index = 0; index < ordered.length; index += 1) {
+    const branchId = lakeLoadTestBranchId(ordered[index]);
+    await onProgress(`Purging branch ${index + 1} of ${ordered.length}: ${branchId}`);
+    const operation = await postgresRequest(
+      workspaceClient,
+      `/api/2.0/postgres/${projectName}/branches/${branchId}`,
+      'DELETE',
+      { purge: true }
+    );
+    await waitForPostgresOperation(workspaceClient, operationNameFrom(operation));
+  }
+}
+
+async function waitForPostgresOperation(workspaceClient: WorkspaceClient, operationName: string) {
+  for (let attempt = 0; attempt < 300; attempt += 1) {
+    const operation = await postgresRequest(workspaceClient, `/api/2.0/postgres/${operationName}`, 'GET');
+    const record = operation && typeof operation === 'object' ? (operation as Record<string, unknown>) : {};
+    if (record.done === true) {
+      if (record.error) throw new Error(`Branch purge failed: ${JSON.stringify(record.error)}`);
+      return;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 1_000));
+  }
+  throw new Error(`Branch purge operation ${operationName} exceeded five minutes`);
+}
+
+async function updateReset(control: Queryable, id: string, status: string, message: string) {
+  await control.query('UPDATE lakeload_control.reset_operation SET status=$2,message=$3 WHERE id=$1', [
+    id,
+    status,
+    message,
+  ]);
+}
+
 async function monitorBranchOperation(
   control: Queryable,
   workspaceClient: WorkspaceClient,
@@ -664,8 +834,12 @@ async function metricsFor(control: Queryable, runId: string) {
   );
 }
 
-async function prepareLakebase(target: Queryable) {
+async function ensureLakebaseBenchmarkSchema(target: Queryable) {
   await target.query(BENCHMARK_SCHEMA_SQL);
+}
+
+async function prepareLakebase(target: Queryable) {
+  await ensureLakebaseBenchmarkSchema(target);
   await target.query(`INSERT INTO lakeload_bench.dataset_marker(id,schema_version,seed) VALUES(1,2,424242)
     ON CONFLICT(id) DO UPDATE SET schema_version=EXCLUDED.schema_version, seed=EXCLUDED.seed, prepared_at=NOW()`);
   await target.query(`INSERT INTO lakeload_bench.account(id,region,balance)

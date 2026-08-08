@@ -43,6 +43,19 @@ Open the App and select **Settings**. Under **SQL warehouse under test**, choose
 
 The selector lists warehouses visible to the App service principal. The warehouse declared during installation is available automatically. To test another warehouse, grant the LakeLoad App service principal `CAN USE` on it and reopen Settings. The selected ID is persisted in the control database, included in every run manifest, and used for DBSQL setup, standalone workloads, and paired comparisons.
 
+### Start again with a clean environment
+
+Open **Settings > Hard reset** when the demo environment must be returned to an empty state. The confirmation dialog requires the exact phrase `RESET LAKELOAD`. Reset runs asynchronously and its current phase remains visible in Settings.
+
+Hard Reset permanently removes only LakeLoad-owned test artifacts:
+
+- every row in the dedicated `lakeload_bench` PostgreSQL tables;
+- the dedicated `main.lakeload` Delta schema;
+- all run manifests, one-second metrics, and branch-operation history;
+- branches whose IDs match `snapshot-*` or `restore-*`, purged child restores before snapshots.
+
+It preserves the Lakebase project, `production` and `benchmark` branches, database and compute resources, App deployment, and selected SQL warehouse. Active loads and branch operations must finish or be stopped first. When the status reads **Ready for a clean start**, select **Prepare all data** before launching another test.
+
 ### Why installation has a bootstrap command
 
 A Databricks App cannot create and bind the Lakebase project that authenticates the App before the App service principal exists. The installer resolves this dependency in two phases: create Lakebase, deploy the App, then grant the new App service principal scoped catalog rights. After that, every data preparation and test action is initiated in the App.
@@ -293,6 +306,7 @@ The App UI uses these routes, which are also useful for a smoke harness:
 GET    /api/lakeload/overview
 GET    /api/lakeload/warehouses
 POST   /api/lakeload/warehouse
+POST   /api/lakeload/hard-reset
 POST   /api/lakeload/setup
 POST   /api/lakeload/runs
 GET    /api/lakeload/runs/{run_id}

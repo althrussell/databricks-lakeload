@@ -55,6 +55,7 @@ The open-loop smoke reached 99.96% of the requested 500 operations per second wi
 - Negative account count: `0`.
 - Comparison notebook job run `886838542352178`: succeeded.
 - Remote Playwright smoke: passed in Chromium.
+- Guarded Hard Reset acceptance: completed in approximately four seconds, removed 29 stored runs and their metrics, dropped the dedicated Delta schema, emptied all Lakebase benchmark tables, and purged two `snapshot-*`/`restore-*` branches. It preserved `production`, `benchmark`, the App deployment, and the selected `cost-wh` warehouse. A subsequent **Prepare all data** restored the deterministic 5,000,000-row lab dataset.
 - Side-by-side OLTP and OLAP acceptance: both engine lanes completed, result scorecards populated, and all comparison charts exposed pointer inspection.
 - Warehouse Settings acceptance: the App listed both accessible `labs` warehouses, switched from `cost-wh` to `Serverless Starter Warehouse`, connection-tested it, completed a DBSQL point-lookup run with the selected warehouse stamped in the run manifest, and restored the baseline selection.
 - Responsive check: no document-level horizontal overflow at 1,440 px or 375 px.
