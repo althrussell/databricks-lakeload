@@ -17,6 +17,22 @@ test('LakeLoad renders the workload console', async ({ page }) => {
   await page.getByRole('button', { name: 'Settings', exact: true }).click();
   await expect(page.getByRole('heading', { name: 'SQL warehouse under test', exact: true })).toBeVisible();
   await expect(page.getByRole('combobox', { name: 'SQL warehouse' })).toBeVisible();
+  const selectedWarehouse = page.getByRole('button', { name: 'Selected for DBSQL tests', exact: true });
+  await expect(selectedWarehouse).toBeDisabled();
+  const disabledContrast = await selectedWarehouse.evaluate((element) => {
+    const style = getComputedStyle(element);
+    const luminance = (value: string) => {
+      const channels = (value.match(/[\d.]+/g) ?? []).slice(0, 3).map(Number);
+      return channels
+        .map((channel) => channel / 255)
+        .map((channel) => (channel <= 0.04045 ? channel / 12.92 : ((channel + 0.055) / 1.055) ** 2.4))
+        .reduce((sum, channel, index) => sum + channel * [0.2126, 0.7152, 0.0722][index], 0);
+    };
+    const foreground = luminance(style.color);
+    const background = luminance(style.backgroundColor);
+    return (Math.max(foreground, background) + 0.05) / (Math.min(foreground, background) + 0.05);
+  });
+  expect(disabledContrast).toBeGreaterThanOrEqual(4.5);
   await expect(page.getByRole('button', { name: 'Hard reset', exact: true })).toBeVisible();
 });
 

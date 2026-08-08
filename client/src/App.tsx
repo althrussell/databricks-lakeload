@@ -1716,7 +1716,19 @@ function WarehouseSettings({
             Boolean(overview.activeRunId)
           }
         >
-          {saving ? <RefreshCw className="spin" /> : <Check />} Use for DBSQL tests
+          {saving ? (
+            <>
+              <RefreshCw className="spin" /> Saving warehouse
+            </>
+          ) : selectedId === overview.sqlWarehouse.id ? (
+            <>
+              <Check /> Selected for DBSQL tests
+            </>
+          ) : (
+            <>
+              <Check /> Use for DBSQL tests
+            </>
+          )}
         </Button>
       </div>
       <div className="warehouse-access-note">

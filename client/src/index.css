@@ -1483,6 +1483,16 @@ h3 {
   cursor: not-allowed;
   opacity: 0.6;
 }
+.warehouse-picker > button:disabled {
+  border: 0.0625rem solid var(--db-navy-600);
+  color: var(--db-ink-200);
+  background: var(--db-navy-700);
+  box-shadow: none;
+  opacity: 1;
+}
+.warehouse-picker > button:disabled svg {
+  color: var(--db-ink-300);
+}
 .warehouse-facts {
   display: flex;
   gap: 0.45rem;
