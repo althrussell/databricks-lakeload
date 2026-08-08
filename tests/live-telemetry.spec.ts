@@ -37,8 +37,8 @@ test('every graph advances from the one-second live stream', async ({ page }, te
         return ((await response.json()).activeMetrics as unknown[]).length;
       })
       .toBeGreaterThanOrEqual(3);
-    await expect(page.getByText('1s LIVE')).toHaveCount(6, { timeout: 20_000 });
-    await expectEveryChartToAdvance(page.locator('.charts-grid svg[aria-label*="updated every second"]'), 6);
+    await expect(page.getByText('1s LIVE')).toHaveCount(7, { timeout: 20_000 });
+    await expectEveryChartToAdvance(page.locator('.charts-grid svg[aria-label*="updated every second"]'), 7);
     await page.screenshot({ path: testInfo.outputPath('live-console-1440.png'), fullPage: true });
 
     await page.getByRole('button', { name: 'Branch lab', exact: true }).click();
@@ -101,7 +101,7 @@ test('chart samples can be inspected with pointer and keyboard', async ({ page }
   const tooltip = page.locator('.charts-grid .chart-tooltip').first();
   await expect(tooltip).toBeVisible();
   await expect(tooltip.getByText('Sample', { exact: true })).toBeVisible();
-  await expect(tooltip.getByText('workload TPS', { exact: true })).toBeVisible();
+  await expect(tooltip.getByText('completed', { exact: true })).toBeVisible();
   await page.screenshot({ path: testInfo.outputPath('chart-hover-inspection.png'), fullPage: false });
 
   await page.mouse.move(0, 0);

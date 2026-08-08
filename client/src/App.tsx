@@ -57,11 +57,18 @@ interface Run {
   concurrency: number;
   duration_seconds: number;
   ramp_seconds: number;
+  warmup_seconds: number;
+  seed: number;
   execution_model: 'closed' | 'open';
   target_rps: number | null;
   created_at: string;
   total_operations: number | string;
   total_errors: number | string;
+  dropped_operations: number | string;
+  query_errors: number | string;
+  measurement_started_at: string | null;
+  methodology_version: string;
+  environment: Record<string, unknown>;
   p50_ms: number;
   p95_ms: number;
   p99_ms: number;
@@ -93,6 +100,15 @@ interface Metric {
   locks_total: number;
   cache_hit_pct: number;
   database_bytes: number;
+  interval_ms: number;
+  throughput_rps: number;
+  offered: number;
+  dropped: number;
+  query_errors: number;
+  mean_ms: number;
+  max_ms: number;
+  phase: 'warmup' | 'measure';
+  target_rps: number;
 }
 
 interface Branch {
@@ -206,6 +222,7 @@ interface ComparisonPreset {
   concurrency: number;
   duration: number;
   ramp: number;
+  warmup: number;
   method: string;
   interpretation: string;
   matched: boolean;
@@ -221,8 +238,9 @@ const COMPARISON_PRESETS: ComparisonPreset[] = [
     lakebaseScenario: 'lakebase-point-lookup',
     dbsqlScenario: 'dbsql-point-lookup',
     concurrency: 10,
-    duration: 20,
-    ramp: 3,
+    duration: 10,
+    ramp: 2,
+    warmup: 3,
     method: 'The same primary-key lookup, key range, concurrency, duration, and warm-state policy on both engines.',
     interpretation:
       'Compare throughput and tail latency. Lakebase is built for concurrent, low-latency request serving.',
@@ -236,8 +254,9 @@ const COMPARISON_PRESETS: ComparisonPreset[] = [
     lakebaseScenario: 'lakebase-olap-scan',
     dbsqlScenario: 'dbsql-olap-scan',
     concurrency: 1,
-    duration: 20,
+    duration: 10,
     ramp: 0,
+    warmup: 0,
     method: 'Five million fact rows, account and product joins, grouped aggregation, and matched client pressure.',
     interpretation:
       'Compare completed analytical queries and latency. DBSQL is built for parallel analytical execution.',
@@ -252,8 +271,9 @@ const COMPARISON_PRESETS: ComparisonPreset[] = [
     lakebaseScenario: 'lakebase-mixed',
     dbsqlScenario: 'dbsql-olap-scan',
     concurrency: 2,
-    duration: 20,
+    duration: 10,
     ramp: 2,
+    warmup: 3,
     method:
       'Lakebase runs mixed application traffic; DBSQL runs the wide historical scan. These are intentionally different jobs.',
     interpretation:
@@ -292,6 +312,14 @@ const metricKeys: Array<keyof Metric> = [
   'locks_total',
   'cache_hit_pct',
   'database_bytes',
+  'interval_ms',
+  'throughput_rps',
+  'offered',
+  'dropped',
+  'query_errors',
+  'mean_ms',
+  'max_ms',
+  'target_rps',
 ];
 
 const HELP = {
@@ -310,6 +338,11 @@ const HELP = {
   targetArrivalRate:
     'The number of operations LakeLoad attempts to start each second. Actual completed throughput can be lower when the system or client pool is saturated.',
   workloadTps: 'Operations completed by the load generator during the latest one-second sample.',
+  offeredRate: 'Operations the load generator attempted to start per second, normalized by the actual sample width.',
+  admissionDrops:
+    'Operations the load generator could not start because the configured in-flight concurrency limit was full. These are client-side saturation signals, not database query errors.',
+  warmup:
+    'Traffic generated before measurement begins. Warm-up samples remain visible, but they are excluded from headline throughput, latency, and error results.',
   p50: 'Median request latency. Half of completed requests were faster and half were slower.',
   p95: '95th-percentile request latency. 95% of completed requests were this fast or faster.',
   p99: '99th-percentile request latency. This exposes slow tail requests that averages can hide.',
@@ -351,7 +384,9 @@ const HELP = {
 } as const;
 
 const METRIC_HELP: Partial<Record<MetricKey, string>> = {
-  operations: HELP.workloadTps,
+  throughput_rps: HELP.workloadTps,
+  target_rps: HELP.offeredRate,
+  dropped: HELP.admissionDrops,
   database_tps: HELP.databaseTps,
   p50_ms: HELP.p50,
   p95_ms: HELP.p95,
@@ -379,6 +414,7 @@ export default function App() {
   const [concurrency, setConcurrency] = useState(50);
   const [duration, setDuration] = useState(60);
   const [ramp, setRamp] = useState(10);
+  const [warmup, setWarmup] = useState(5);
   const [executionModel, setExecutionModel] = useState<'closed' | 'open'>('closed');
   const [targetRps, setTargetRps] = useState(500);
   const [busy, setBusy] = useState(false);
@@ -435,11 +471,16 @@ export default function App() {
   const live = selectedRun?.status === 'running';
   const progress =
     live && latest
-      ? Math.min(100, (latest.elapsed_seconds / selectedRun.duration_seconds) * 100)
+      ? Math.min(
+          100,
+          (latest.elapsed_seconds /
+            (selectedRun.duration_seconds + Math.max(selectedRun.warmup_seconds, selectedRun.ramp_seconds))) *
+            100
+        )
       : selectedRun?.status === 'completed'
         ? 100
         : 0;
-  const errorRate = latest ? (latest.errors / Math.max(1, latest.operations + latest.errors)) * 100 : 0;
+  const errorRate = latest ? (latest.errors / Math.max(1, latest.offered)) * 100 : 0;
 
   function chooseScenario(scenario: Scenario) {
     setSelectedScenarioId(scenario.id);
@@ -460,6 +501,8 @@ export default function App() {
           concurrency,
           durationSeconds: duration,
           rampSeconds: ramp,
+          warmupSeconds: warmup,
+          seed: 424242,
           executionModel,
           targetRps: executionModel === 'open' ? targetRps : undefined,
         }),
@@ -617,6 +660,8 @@ export default function App() {
             setDuration={setDuration}
             ramp={ramp}
             setRamp={setRamp}
+            warmup={warmup}
+            setWarmup={setWarmup}
             executionModel={executionModel}
             setExecutionModel={setExecutionModel}
             targetRps={targetRps}
@@ -673,6 +718,8 @@ type LiveConsoleProps = {
   setDuration: (value: number) => void;
   ramp: number;
   setRamp: (value: number) => void;
+  warmup: number;
+  setWarmup: (value: number) => void;
   executionModel: 'closed' | 'open';
   setExecutionModel: (value: 'closed' | 'open') => void;
   targetRps: number;
@@ -761,6 +808,16 @@ function LiveConsole(props: LiveConsoleProps) {
               suffix=" sec"
               help={HELP.ramp}
             />
+            <Range
+              label="Warm-up"
+              value={props.warmup}
+              min={0}
+              max={30}
+              step={1}
+              onChange={props.setWarmup}
+              suffix=" sec"
+              help={HELP.warmup}
+            />
           </div>
           <div className="model-row">
             <div className="segmented">
@@ -847,14 +904,38 @@ function LiveConsole(props: LiveConsoleProps) {
             </div>
           )}
         </div>
+        {props.selectedRun && (
+          <div className="evidence-strip" aria-label="Benchmark protocol and exports">
+            <span>
+              <ShieldCheck />
+              <b>Method {props.selectedRun.methodology_version}</b>
+            </span>
+            <span>
+              phase <b>{props.latest?.phase ?? 'recorded'}</b>
+            </span>
+            <span>
+              pre-measure <b>{Math.max(props.selectedRun.warmup_seconds, props.selectedRun.ramp_seconds)}s excluded</b>
+            </span>
+            <span>
+              seed <b>{props.selectedRun.seed}</b>
+            </span>
+            <span>
+              sample <b>{value(props.latest?.interval_ms).toFixed(0)} ms</b>
+            </span>
+            <div>
+              <a href={`/api/lakeload/runs/${props.selectedRun.id}/export?format=json`}>Export evidence JSON</a>
+              <a href={`/api/lakeload/runs/${props.selectedRun.id}/export?format=csv`}>Metrics CSV</a>
+            </div>
+          </div>
+        )}
         <div className="progress-track">
           <span style={{ transform: `scaleX(${props.progress / 100})` }} />
         </div>
         <div className="hero-metrics">
           <MetricCard
             icon={<Zap />}
-            label="Workload TPS"
-            value={compact(value(props.latest?.operations))}
+            label="Completed TPS"
+            value={compact(value(props.latest?.throughput_rps))}
             unit="ops/s"
             description={HELP.workloadTps}
           />
@@ -894,14 +975,18 @@ function LiveConsole(props: LiveConsoleProps) {
             description={HELP.errorRate}
           />
         </div>
+        {props.selectedRun && props.latest && (
+          <BottleneckInsight run={props.selectedRun} metric={props.latest} poolSize={props.overview.endpoint.poolSize} />
+        )}
         <div className="charts-grid">
           <LiveChart
             live={props.selectedRun?.status === 'running'}
             title="Throughput"
-            subtitle="Workload operations and database transactions per second"
+            subtitle="Successful completions, offered demand, and database transactions per second"
             metrics={props.metrics}
             series={[
-              { key: 'operations', label: 'workload TPS', tone: 'cyan' },
+              { key: 'throughput_rps', label: 'completed', tone: 'cyan' },
+              { key: 'target_rps', label: 'offered', tone: 'amber' },
               { key: 'database_tps', label: 'database tx/s', tone: 'green' },
             ]}
           />
@@ -960,9 +1045,59 @@ function LiveConsole(props: LiveConsoleProps) {
               { key: 'locks_waiting', label: 'waiting locks', tone: 'red' },
             ]}
           />
+          <LiveChart
+            live={props.selectedRun?.status === 'running'}
+            title="Saturation signals"
+            subtitle="Client admission drops and database query failures in each sample"
+            metrics={props.metrics}
+            series={[
+              { key: 'dropped', label: 'admission drops', tone: 'amber' },
+              { key: 'query_errors', label: 'query errors', tone: 'red' },
+            ]}
+          />
         </div>
       </section>
     </>
+  );
+}
+
+function BottleneckInsight({ run, metric, poolSize }: { run: Run; metric: Metric; poolSize: number }) {
+  const offered = value(metric.target_rps);
+  const completed = value(metric.throughput_rps);
+  const attainment = offered > 0 ? (completed / offered) * 100 : 100;
+  let tone = 'healthy';
+  let title = 'Demand is being absorbed';
+  let detail = `${attainment.toFixed(1)}% of offered work completed in this sample with no visible saturation signal.`;
+  if (metric.dropped > 0) {
+    tone = 'client';
+    title = 'Client admission ceiling reached';
+    detail = `${metric.dropped} arrivals were not started because ${run.concurrency} in-flight slots were full. This is load-generator backpressure, not a database query failure.`;
+  } else if (metric.query_errors > 0) {
+    tone = 'error';
+    title = 'Engine errors are limiting throughput';
+    detail = `${metric.query_errors} admitted requests failed. Inspect the run export and App logs before attributing this result to capacity.`;
+  } else if (metric.locks_waiting > 0) {
+    tone = 'warning';
+    title = 'Lock contention is visible';
+    detail = `${metric.locks_waiting} locks are waiting. Compare this point with p99 and transaction throughput.`;
+  } else if (run.engine === 'lakebase' && metric.connections_total >= poolSize) {
+    tone = 'client';
+    title = 'Connection pool ceiling reached';
+    detail = `${metric.connections_total} connections are open against a configured pool cap of ${poolSize}. Increase the cap only if the endpoint and test design allow it.`;
+  } else if (run.execution_model === 'open' && attainment < 90) {
+    tone = 'warning';
+    title = 'Throughput is falling behind demand';
+    detail = `Only ${attainment.toFixed(1)}% of offered arrivals completed in this sample. Watch p99 and drops to locate queueing.`;
+  }
+  return (
+    <div className={`bottleneck-insight ${tone}`} role="status">
+      <span>{tone === 'healthy' ? <ShieldCheck /> : <CircleAlert />}</span>
+      <div>
+        <strong>{title}</strong>
+        <p>{detail}</p>
+      </div>
+      <code>{metric.phase === 'warmup' ? 'PRE-MEASURE' : `${attainment.toFixed(0)}% ATTAINMENT`}</code>
+    </div>
   );
 }
 
@@ -1025,6 +1160,7 @@ function ComparisonView({ overview, onOpenSetup }: { overview: Overview; onOpenS
   const [concurrency, setConcurrency] = useState(preset.concurrency);
   const [duration, setDuration] = useState(preset.duration);
   const [ramp, setRamp] = useState(preset.ramp);
+  const [repeats, setRepeats] = useState<1 | 3>(1);
   const [lakebase, setLakebase] = useState<RunDetails | null>(null);
   const [dbsql, setDbsql] = useState<RunDetails | null>(null);
   const [phase, setPhase] = useState<'lakebase' | 'dbsql' | null>(null);
@@ -1035,16 +1171,31 @@ function ComparisonView({ overview, onOpenSetup }: { overview: Overview; onOpenS
   const lakebaseScenario = overview.scenarios.find((scenario) => scenario.id === preset.lakebaseScenario);
   const dbsqlScenario = overview.scenarios.find((scenario) => scenario.id === preset.dbsqlScenario);
   const latestLakebaseId = overview.runs.find(
-    (run) => run.scenario === preset.lakebaseScenario && run.status === 'completed'
+    (run) =>
+      run.scenario === preset.lakebaseScenario &&
+      run.status === 'completed' &&
+      run.concurrency === concurrency &&
+      run.duration_seconds === duration &&
+      run.ramp_seconds === ramp &&
+      run.warmup_seconds === preset.warmup &&
+      run.methodology_version === 'v3'
   )?.id;
   const latestDbsqlId = overview.runs.find(
-    (run) => run.scenario === preset.dbsqlScenario && run.status === 'completed'
+    (run) =>
+      run.scenario === preset.dbsqlScenario &&
+      run.status === 'completed' &&
+      run.concurrency === concurrency &&
+      run.duration_seconds === duration &&
+      run.ramp_seconds === ramp &&
+      run.warmup_seconds === preset.warmup &&
+      run.methodology_version === 'v3'
   )?.id;
 
   useEffect(() => {
     setConcurrency(preset.concurrency);
     setDuration(preset.duration);
     setRamp(preset.ramp);
+    setRepeats(1);
     setError('');
   }, [preset]);
 
@@ -1079,6 +1230,8 @@ function ComparisonView({ overview, onOpenSetup }: { overview: Overview; onOpenS
           concurrency,
           durationSeconds: duration,
           rampSeconds: ramp,
+          warmupSeconds: preset.warmup,
+          seed: 424242,
           executionModel: 'closed',
         }),
       });
@@ -1108,15 +1261,19 @@ function ComparisonView({ overview, onOpenSetup }: { overview: Overview; onOpenS
     setLakebase(null);
     setDbsql(null);
     try {
-      setPhase('lakebase');
-      const lakebaseRunId = await startScenario(lakebaseScenario.id);
-      const lakebaseResult = await followRun(lakebaseRunId, setLakebase);
-      if (cancelRequested.current || lakebaseResult.run.status !== 'completed') return;
+      for (let repeat = 0; repeat < repeats; repeat += 1) {
+        setPhase('lakebase');
+        const lakebaseRunId = await startScenario(lakebaseScenario.id);
+        const lakebaseResult = await followRun(lakebaseRunId, setLakebase);
+        if (cancelRequested.current || lakebaseResult.run.status !== 'completed') return;
 
-      await pause(1_000);
-      setPhase('dbsql');
-      const dbsqlRunId = await startScenario(dbsqlScenario.id);
-      await followRun(dbsqlRunId, setDbsql);
+        await pause(1_000);
+        setPhase('dbsql');
+        const dbsqlRunId = await startScenario(dbsqlScenario.id);
+        const dbsqlResult = await followRun(dbsqlRunId, setDbsql);
+        if (cancelRequested.current || dbsqlResult.run.status !== 'completed') return;
+        if (repeat < repeats - 1) await pause(1_000);
+      }
     } catch (comparisonError) {
       setError(comparisonError instanceof Error ? comparisonError.message : String(comparisonError));
     } finally {
@@ -1212,9 +1369,23 @@ function ComparisonView({ overview, onOpenSetup }: { overview: Overview; onOpenS
           />
         </div>
         <div className="comparison-launch">
+          <div className="repeat-selector" aria-label="Comparison repeat count">
+            <HelpLabel
+              label="Evidence strength"
+              description="One pass is ideal for a quick demo. Three passes expose run-to-run variation and are the minimum recommended before quoting a result."
+            />
+            <div className="segmented">
+              <button className={repeats === 1 ? 'active' : ''} onClick={() => setRepeats(1)} disabled={busy}>
+                1 pass
+              </button>
+              <button className={repeats === 3 ? 'active' : ''} onClick={() => setRepeats(3)} disabled={busy}>
+                3-pass evidence
+              </button>
+            </div>
+          </div>
           <span>
             <HelpLabel label="Estimated wall time" description={HELP.estimatedWallTime} />{' '}
-            <b>{duration * 2 + 2}s</b>
+            <b>{((duration + Math.max(preset.warmup, ramp)) * 2 + 2) * repeats}s</b>
           </span>
           {!ready ? (
             <Button size="lg" onClick={onOpenSetup}>
@@ -1231,7 +1402,7 @@ function ComparisonView({ overview, onOpenSetup }: { overview: Overview; onOpenS
               disabled={Boolean(overview.activeRunId)}
               onClick={() => void runComparison()}
             >
-              <Play /> Run matched comparison
+              <Play /> {repeats === 3 ? 'Run 3-pass evidence suite' : 'Run matched comparison'}
             </Button>
           )}
         </div>
@@ -1243,6 +1414,13 @@ function ComparisonView({ overview, onOpenSetup }: { overview: Overview; onOpenS
       </section>
 
       <ComparisonScorecard preset={preset} lakebase={lakebase} dbsql={dbsql} />
+      <RepeatabilityPanel
+        overview={overview}
+        preset={preset}
+        concurrency={concurrency}
+        duration={duration}
+        ramp={ramp}
+      />
 
       <section className="comparison-stage">
         <ComparisonLane
@@ -1264,6 +1442,73 @@ function ComparisonView({ overview, onOpenSetup }: { overview: Overview; onOpenS
   );
 }
 
+function RepeatabilityPanel({
+  overview,
+  preset,
+  concurrency,
+  duration,
+  ramp,
+}: {
+  overview: Overview;
+  preset: ComparisonPreset;
+  concurrency: number;
+  duration: number;
+  ramp: number;
+}) {
+  const matching = (scenario: string) =>
+    overview.runs
+      .filter(
+        (run) =>
+          run.scenario === scenario &&
+          run.status === 'completed' &&
+          run.concurrency === concurrency &&
+          run.duration_seconds === duration &&
+          run.ramp_seconds === ramp &&
+          run.warmup_seconds === preset.warmup &&
+          run.seed === 424242 &&
+          run.methodology_version === 'v3'
+      )
+      .slice(0, 3);
+  const lakebaseRuns = matching(preset.lakebaseScenario);
+  const dbsqlRuns = matching(preset.dbsqlScenario);
+  const summary = (runs: Run[]) => {
+    if (runs.length === 0) return { median: 0, spread: 0 };
+    const values = runs.map((run) => value(run.p95_ms)).sort((left, right) => left - right);
+    const median = values[Math.floor(values.length / 2)];
+    return { median, spread: median > 0 ? ((values.at(-1)! - values[0]) / median) * 100 : 0 };
+  };
+  const left = summary(lakebaseRuns);
+  const right = summary(dbsqlRuns);
+  const complete = lakebaseRuns.length >= 3 && dbsqlRuns.length >= 3;
+  const stable = complete && left.spread <= 15 && right.spread <= 15;
+  return (
+    <section className="repeatability-panel surface">
+      <div>
+        <span className="section-kicker">Repeatability</span>
+        <h3>{stable ? 'Stable enough to quote' : complete ? 'Variation needs investigation' : 'Build a 3-pass evidence set'}</h3>
+        <p>
+          {complete
+            ? 'Median p95 and full range across the latest three runs with this exact protocol.'
+            : 'Run the 3-pass suite. LakeLoad will only combine results with matching method, scale, seed, warm-up, and pressure.'}
+        </p>
+      </div>
+      <div className="repeatability-engine lakebase">
+        <span>Lakebase</span>
+        <strong>{lakebaseRuns.length ? `${left.median.toFixed(1)} ms` : '—'}</strong>
+        <small>n={lakebaseRuns.length} · p95 range {left.spread.toFixed(1)}%</small>
+      </div>
+      <div className="repeatability-engine dbsql">
+        <span>DBSQL</span>
+        <strong>{dbsqlRuns.length ? `${right.median.toFixed(1)} ms` : '—'}</strong>
+        <small>n={dbsqlRuns.length} · p95 range {right.spread.toFixed(1)}%</small>
+      </div>
+      <Badge variant="outline" className={stable ? 'repeat-stable' : ''}>
+        {stable ? '≤15% spread' : complete ? '>15% spread' : `${Math.min(lakebaseRuns.length, dbsqlRuns.length)}/3 pairs`}
+      </Badge>
+    </section>
+  );
+}
+
 function ComparisonLane({
   engine,
   title,
@@ -1280,7 +1525,7 @@ function ComparisonLane({
   const run = details?.run;
   const metrics = details?.metrics ?? [];
   const latest = metrics.at(-1);
-  const elapsed = Math.max(1, value(latest?.elapsed_seconds));
+  const elapsed = Math.max(1, run?.duration_seconds ?? value(latest?.elapsed_seconds));
   const completedOperations =
     run && run.status === 'completed'
       ? value(run.total_operations)
@@ -1332,9 +1577,12 @@ function ComparisonLane({
         <LiveChart
           live={active}
           title={`${title} throughput`}
-          subtitle="Completed operations in each one-second interval"
+          subtitle="Successful completions normalized by actual sample width"
           metrics={metrics}
-          series={[{ key: 'operations', label: 'operations', tone: engine === 'lakebase' ? 'cyan' : 'indigo' }]}
+          series={[
+            { key: 'throughput_rps', label: 'completed', tone: engine === 'lakebase' ? 'cyan' : 'indigo' },
+            { key: 'target_rps', label: 'offered', tone: 'amber' },
+          ]}
         />
         <LiveChart
           live={active}
@@ -1353,6 +1601,7 @@ function ComparisonLane({
         <footer>
           <span>{run.concurrency} clients</span>
           <span>{run.duration_seconds}s configured</span>
+          <span>{Math.max(run.warmup_seconds, run.ramp_seconds)}s pre-measure excluded</span>
           <span>{compact(value(run.total_operations))} operations</span>
         </footer>
       )}
@@ -1399,6 +1648,7 @@ function ComparisonScorecard({
   const rightError = right ? runErrorRate(right) : null;
   const leftGuardrails = comparisonGuardrails(preset, 'lakebase');
   const rightGuardrails = comparisonGuardrails(preset, 'dbsql');
+  const eligibility = comparisonEligibility(preset, lakebase, dbsql);
   const verdict = comparisonVerdict(preset, lakebase, dbsql);
   return (
     <section className="comparison-scorecard surface">
@@ -1414,6 +1664,13 @@ function ComparisonScorecard({
             description="For matched workloads, p95 latency is the primary signal, error rate is a guardrail, and throughput breaks close results. Best-fit workloads use separate OLTP and OLAP targets."
           />
         </div>
+      </div>
+      <div className={`evidence-quality ${eligibility.eligible ? 'eligible' : 'ineligible'}`}>
+        {eligibility.eligible ? <ShieldCheck /> : <CircleAlert />}
+        <span>
+          <strong>{eligibility.eligible ? 'Decision-grade pair' : 'Not yet decision-grade'}</strong>
+          <small>{eligibility.detail}</small>
+        </span>
       </div>
       <div className={`comparison-verdict ${verdict.tone}`} role="status" aria-live="polite">
         <span className="verdict-icon">{verdict.tone === 'winner' ? <Trophy /> : <Target />}</span>
@@ -1546,8 +1803,7 @@ function comparisonTps(details: RunDetails | null) {
 
 function comparisonRate(details: RunDetails | null) {
   if (!details?.run) return null;
-  const elapsed = Math.max(1, value(details.metrics.at(-1)?.elapsed_seconds) || details.run.duration_seconds);
-  return value(details.run.total_operations) / elapsed;
+  return value(details.run.total_operations) / Math.max(1, details.run.duration_seconds);
 }
 
 function runErrorRate(run: Run) {
@@ -1624,6 +1880,17 @@ function comparisonVerdict(preset: ComparisonPreset, lakebase: RunDetails | null
     };
   }
 
+  const eligibility = comparisonEligibility(preset, lakebase, dbsql);
+  if (!eligibility.eligible) {
+    return {
+      tone: 'pending',
+      eyebrow: 'Evidence check',
+      title: 'Run a controlled pair before selecting a winner',
+      detail: eligibility.detail,
+      facts: ['Same protocol', 'Same deterministic scale', 'Warm-up excluded'],
+    };
+  }
+
   const leftRate = comparisonRate(lakebase) ?? 0;
   const rightRate = comparisonRate(dbsql) ?? 0;
   const leftError = runErrorRate(left);
@@ -1681,6 +1948,41 @@ function comparisonVerdict(preset: ComparisonPreset, lakebase: RunDetails | null
       `Throughput: ${higherRateEngine} ${rateRatio.toFixed(1)}× higher`,
       `Errors: ${leftError.toFixed(2)}% / ${rightError.toFixed(2)}%`,
     ],
+  };
+}
+
+function comparisonEligibility(
+  preset: ComparisonPreset,
+  lakebase: RunDetails | null,
+  dbsql: RunDetails | null
+): { eligible: boolean; detail: string } {
+  const left = lakebase?.run;
+  const right = dbsql?.run;
+  if (!left || !right) return { eligible: false, detail: 'Both engines need a completed result.' };
+  if (left.status !== 'completed' || right.status !== 'completed')
+    return { eligible: false, detail: 'Only completed runs can support a decision.' };
+  const sameProtocol =
+    left.concurrency === right.concurrency &&
+    left.duration_seconds === right.duration_seconds &&
+    left.ramp_seconds === right.ramp_seconds &&
+    left.warmup_seconds === right.warmup_seconds &&
+    left.execution_model === right.execution_model &&
+    left.seed === right.seed &&
+    left.methodology_version === right.methodology_version;
+  if (!sameProtocol)
+    return {
+      eligible: false,
+      detail: 'The displayed historical runs use different concurrency, duration, ramp, warm-up, seed, or method versions. Run the pair above.',
+    };
+  if (left.methodology_version !== 'v3' || right.methodology_version !== 'v3')
+    return { eligible: false, detail: 'These results predate request-start phase classification. Run a v3 pair.' };
+  const leftDataset = JSON.stringify(left.environment?.dataset ?? null);
+  const rightDataset = JSON.stringify(right.environment?.dataset ?? null);
+  if (preset.matched && (leftDataset === 'null' || leftDataset !== rightDataset))
+    return { eligible: false, detail: 'Matched decisions require the same recorded dataset fingerprint.' };
+  return {
+    eligible: true,
+    detail: `${left.methodology_version}: identical protocol and seed; successful latency measured after ${left.warmup_seconds}s warm-up.`,
   };
 }
 
@@ -2021,7 +2323,7 @@ function SetupView({
               <Database />
               <span>
                 <b>Lakebase PostgreSQL</b>
-                <small>10K accounts · 1K products · 5M history rows</small>
+                <small>1M accounts · 10K products · 5M history rows</small>
               </span>
             </div>
             <div>
@@ -2550,6 +2852,10 @@ function HardResetSettings({
 type MetricKey = keyof Pick<
   Metric,
   | 'operations'
+  | 'throughput_rps'
+  | 'target_rps'
+  | 'dropped'
+  | 'query_errors'
   | 'database_tps'
   | 'p50_ms'
   | 'p95_ms'
@@ -2596,6 +2902,9 @@ function LiveChart({
       )
       .join(' ');
   const latest = metrics.at(-1);
+  const warmupSamples = metrics.filter((metric) => metric.phase === 'warmup').length;
+  const warmupWidth =
+    metrics.length <= 1 ? 0 : (warmupSamples / Math.max(1, metrics.length - 1)) * (width - 2 * padding);
   const inspected = inspectionIndex === null ? null : metrics[inspectionIndex];
   const inspectedPrevious = inspectionIndex === null ? null : metrics[Math.max(0, inspectionIndex - 1)];
   const inspectedX =
@@ -2673,6 +2982,12 @@ function LiveChart({
               }
             }}
           >
+            {warmupWidth > 0 && (
+              <g className="chart-warmup" aria-hidden="true">
+                <rect x={padding} y={padding} width={warmupWidth} height={height - 2 * padding} />
+                <text x={padding + 7} y={padding + 15}>WARM-UP · EXCLUDED</text>
+              </g>
+            )}
             <g className="grid-lines">
               <line x1={padding} y1={padding} x2={width - padding} y2={padding} />
               <line x1={padding} y1={height / 2} x2={width - padding} y2={height / 2} />
@@ -2704,7 +3019,7 @@ function LiveChart({
             >
               <div className="tooltip-time">
                 <span>Sample</span>
-                <strong>{inspected.elapsed_seconds}s</strong>
+                <strong>{inspected.elapsed_seconds}s · {inspected.phase}</strong>
               </div>
               {series.map((item) => {
                 const currentValue = value(inspected[item.key]);

@@ -10,7 +10,7 @@ LakeLoad is a repeatable Databricks App for demonstrating Lakebase OLTP, DBSQL O
 - One DBSQL warehouse binding for Delta setup and OLAP scenarios.
 - One executable DBSQL-versus-Lakebase notebook job.
 - A copy-on-write Branch Lab for live snapshots and isolated restore branches.
-- PostgreSQL tables in `lakeload_bench`: `account` (10,000 rows), `product` (1,000 rows), and `history` (5 million rows).
+- PostgreSQL tables in `lakeload_bench`: `account` (1 million rows), `product` (10,000 rows), and `history` (5 million rows).
 - Delta tables in `<catalog>.lakeload`: `account` (1 million rows), `product` (10,000 rows), and `history` (5 million rows).
 
 No database password is stored. The App and jobs mint short-lived OAuth database credentials.
@@ -108,7 +108,7 @@ Preview features remain disabled until the readiness check passes. LakeLoad neve
 #### Operational join
 
 - Question: How quickly can the application join the current entity to a bounded recent-history window?
-- Query: one account range joined to the latest 1,000 audit events, grouped by region.
+- Query: one account joined through the account/time index to its latest 20 audit events, grouped by region.
 - Interpretation: bounded operational joins belong close to mutable state. Large historical scans do not.
 
 ### OLAP: DBSQL
@@ -238,7 +238,7 @@ LakeLoad does not provision an external collector.
 
 1. Prepare data once from Setup.
 2. Record the Lakebase endpoint CU minimum/maximum, DBSQL warehouse size, runner location, data scale, seed, and Git commit.
-3. Run one warm-up that is excluded from headline metrics.
+3. Keep the default five-second warm-up or choose zero to include first-query startup. Warm-up remains visible but is excluded from headline metrics.
 4. Run at least three measured repetitions in the same cache state.
 5. Use the same logical question, not necessarily identical physical SQL. A bounded operational query and a historical analytical query are different workloads.
 6. Report median throughput plus p50, p95, p99, errors, and freshness. Do not average p99 values across workers.
@@ -249,23 +249,26 @@ LakeLoad does not provision an external collector.
 
 Open **Compare engines** in the navigation rail. Each preset applies one concurrency, duration, ramp, execution model, and warm-state policy to both lanes. LakeLoad runs the engines sequentially so one client workload does not interfere with the other, streams each lane at one-second resolution, then keeps both recorded timelines visible together.
 
-- **Indexed request serving** issues the same single-account lookup over the same 1–10,000 key range. Use throughput and p95/p99 to explain why Lakebase belongs on the synchronous OLTP request path.
+- **Indexed request serving** issues the same account-and-product lookup over the same 1M/10K key ranges. Use throughput and p95/p99 to explain why Lakebase belongs on the synchronous OLTP request path.
 - **Five-million-row scan and join** makes both engines scan five million fact rows, join account and product dimensions, and aggregate by region and category. Use completed analytical queries and latency to explain DBSQL's OLAP execution fit.
 - **Transactions beside analytics** deliberately runs different workloads: mixed application traffic in Lakebase and a wide scan in DBSQL. It is an architecture demonstration, not a speed comparison.
 
-For a customer measurement, select a preset, set the shared controls, and choose **Run matched comparison**. Watch the running lane's throughput and latency charts; hover any point for the exact one-second values. When both lanes finish, use **Engine-fit evidence** for the side-by-side totals and measured interpretation. Repeat at least three times and record the compute sizes and cache state before quoting a result.
+For a customer measurement, select a preset, set the shared controls, choose **3-pass evidence**, and run the suite. Hover any chart for exact values, phase, and change. LakeLoad refuses to select a winner when pair fingerprints differ. Quote a result only after three runs per engine, then download the JSON evidence package and metric CSV.
 
 ## Read the real-time console
 
-Every visible graph is driven by the same one-second metric stream for the selected active run. The console redraws throughput, latency, connection pressure, row churn, operation mix, and database health once per sample; the Branch Lab continues consuming that stream while control-plane branch operations are in progress.
+Every graph is driven by the same approximately one-second stream. Each sample records its actual width, so rates remain correct when polling or a diagnostic query takes slightly longer. The Branch Lab consumes that stream while control-plane operations are in progress.
 
 Hover any graph to inspect an exact one-second sample. The crosshair readout shows the sample time, each series value, and its percentage change from the previous sample. Keyboard users can focus a graph, move through samples with Left/Right Arrow, and press Escape to close the readout.
 
 | Metric                            | Meaning                                                                                                                                                |
 | --------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| Workload TPS                      | Successful application operations completed in that one-second interval.                                                                               |
-| Database tx/s                     | PostgreSQL commits plus rollbacks observed in the interval. This can exceed workload TPS because one workload operation may use multiple transactions. |
-| p50 / p95 / p99                   | End-to-end operation latency from the load generator.                                                                                                  |
+| Completed ops/s                   | Successful completions normalized by actual sample width.                                                                                              |
+| Offered ops/s                     | Arrivals attempted by target-rate scheduling, normalized by actual sample width.                                                                        |
+| Admission drops                   | Arrivals not started because the configured in-flight client limit was full.                                                                            |
+| Query errors                      | Admitted operations that returned an engine error.                                                                                                      |
+| Database tx/s                     | PostgreSQL commits plus rollbacks normalized by database-stat sample width. It is endpoint context, not an exact workload counter.                      |
+| p50 / p95 / p99                   | Exact nearest-rank latency of successful operations as observed by the load generator.                                                                  |
 | Active / idle / total connections | Current PostgreSQL sessions for the benchmark database.                                                                                                |
 | Inserted / updated / deleted      | PostgreSQL row-change counters sampled as interval deltas.                                                                                             |
 | Cache hit                         | Current PostgreSQL block cache hit ratio.                                                                                                              |

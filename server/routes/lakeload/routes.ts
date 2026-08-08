@@ -40,6 +40,8 @@ const RunRequest = z.object({
   rampSeconds: z.number().int().min(0).max(120),
   executionModel: z.enum(['closed', 'open']).default('closed'),
   targetRps: z.number().int().min(1).max(5_000).optional(),
+  warmupSeconds: z.number().int().min(0).max(60).default(5),
+  seed: z.number().int().min(1).max(2_147_483_647).default(424242),
 });
 
 const BranchRequest = z.object({
@@ -81,6 +83,12 @@ const CONTROL_SCHEMA_SQL = `
   ALTER TABLE lakeload_control.run ADD COLUMN IF NOT EXISTS execution_model TEXT NOT NULL DEFAULT 'closed';
   ALTER TABLE lakeload_control.run ADD COLUMN IF NOT EXISTS target_rps INTEGER;
   ALTER TABLE lakeload_control.run ADD COLUMN IF NOT EXISTS environment JSONB NOT NULL DEFAULT '{}'::jsonb;
+  ALTER TABLE lakeload_control.run ADD COLUMN IF NOT EXISTS warmup_seconds INTEGER NOT NULL DEFAULT 0;
+  ALTER TABLE lakeload_control.run ADD COLUMN IF NOT EXISTS seed INTEGER NOT NULL DEFAULT 424242;
+  ALTER TABLE lakeload_control.run ADD COLUMN IF NOT EXISTS measurement_started_at TIMESTAMPTZ;
+  ALTER TABLE lakeload_control.run ADD COLUMN IF NOT EXISTS dropped_operations BIGINT NOT NULL DEFAULT 0;
+  ALTER TABLE lakeload_control.run ADD COLUMN IF NOT EXISTS query_errors BIGINT NOT NULL DEFAULT 0;
+  ALTER TABLE lakeload_control.run ADD COLUMN IF NOT EXISTS methodology_version TEXT NOT NULL DEFAULT 'v1';
   CREATE TABLE IF NOT EXISTS lakeload_control.run_metric (
     id BIGSERIAL PRIMARY KEY, run_id UUID NOT NULL REFERENCES lakeload_control.run(id) ON DELETE CASCADE,
     recorded_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), elapsed_seconds INTEGER NOT NULL, active_users INTEGER NOT NULL,
@@ -101,6 +109,16 @@ const CONTROL_SCHEMA_SQL = `
   ALTER TABLE lakeload_control.run_metric ADD COLUMN IF NOT EXISTS locks_total INTEGER NOT NULL DEFAULT 0;
   ALTER TABLE lakeload_control.run_metric ADD COLUMN IF NOT EXISTS cache_hit_pct DOUBLE PRECISION NOT NULL DEFAULT 0;
   ALTER TABLE lakeload_control.run_metric ADD COLUMN IF NOT EXISTS database_bytes BIGINT NOT NULL DEFAULT 0;
+  ALTER TABLE lakeload_control.run_metric ALTER COLUMN database_tps TYPE DOUBLE PRECISION USING database_tps::double precision;
+  ALTER TABLE lakeload_control.run_metric ADD COLUMN IF NOT EXISTS interval_ms INTEGER NOT NULL DEFAULT 1000;
+  ALTER TABLE lakeload_control.run_metric ADD COLUMN IF NOT EXISTS throughput_rps DOUBLE PRECISION NOT NULL DEFAULT 0;
+  ALTER TABLE lakeload_control.run_metric ADD COLUMN IF NOT EXISTS offered INTEGER NOT NULL DEFAULT 0;
+  ALTER TABLE lakeload_control.run_metric ADD COLUMN IF NOT EXISTS dropped INTEGER NOT NULL DEFAULT 0;
+  ALTER TABLE lakeload_control.run_metric ADD COLUMN IF NOT EXISTS query_errors INTEGER NOT NULL DEFAULT 0;
+  ALTER TABLE lakeload_control.run_metric ADD COLUMN IF NOT EXISTS mean_ms DOUBLE PRECISION NOT NULL DEFAULT 0;
+  ALTER TABLE lakeload_control.run_metric ADD COLUMN IF NOT EXISTS max_ms DOUBLE PRECISION NOT NULL DEFAULT 0;
+  ALTER TABLE lakeload_control.run_metric ADD COLUMN IF NOT EXISTS phase TEXT NOT NULL DEFAULT 'measure';
+  ALTER TABLE lakeload_control.run_metric ADD COLUMN IF NOT EXISTS target_rps DOUBLE PRECISION NOT NULL DEFAULT 0;
   CREATE INDEX IF NOT EXISTS run_metric_run_time_idx ON lakeload_control.run_metric(run_id, recorded_at);
   CREATE TABLE IF NOT EXISTS lakeload_control.branch_operation (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(), kind TEXT NOT NULL, branch_name TEXT NOT NULL,
@@ -127,8 +145,13 @@ const BENCHMARK_SCHEMA_SQL = `
   CREATE SCHEMA IF NOT EXISTS lakeload_bench;
   CREATE TABLE IF NOT EXISTS lakeload_bench.dataset_marker (
     id INTEGER PRIMARY KEY CHECK (id = 1), schema_version INTEGER NOT NULL, seed BIGINT NOT NULL,
-    prepared_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), prepared_by TEXT NOT NULL DEFAULT current_user
+    expected_balance NUMERIC(20,2), prepared_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    prepared_by TEXT NOT NULL DEFAULT current_user
   );
+  ALTER TABLE lakeload_bench.dataset_marker ADD COLUMN IF NOT EXISTS expected_balance NUMERIC(20,2);
+  ALTER TABLE lakeload_bench.dataset_marker ADD COLUMN IF NOT EXISTS account_rows BIGINT;
+  ALTER TABLE lakeload_bench.dataset_marker ADD COLUMN IF NOT EXISTS product_rows BIGINT;
+  ALTER TABLE lakeload_bench.dataset_marker ADD COLUMN IF NOT EXISTS history_rows BIGINT;
   CREATE TABLE IF NOT EXISTS lakeload_bench.account (
     id INTEGER PRIMARY KEY, region TEXT NOT NULL, balance NUMERIC(14,2) NOT NULL,
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
@@ -141,8 +164,9 @@ const BENCHMARK_SCHEMA_SQL = `
   ALTER TABLE lakeload_bench.product ADD COLUMN IF NOT EXISTS description TEXT NOT NULL DEFAULT '';
   CREATE TABLE IF NOT EXISTS lakeload_bench.history (
     id BIGSERIAL PRIMARY KEY, account_id INTEGER NOT NULL, counterparty_id INTEGER NOT NULL,
-    amount NUMERIC(10,2) NOT NULL, created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    product_id INTEGER NOT NULL DEFAULT 1, amount NUMERIC(10,2) NOT NULL, created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
   );
+  ALTER TABLE lakeload_bench.history ADD COLUMN IF NOT EXISTS product_id INTEGER NOT NULL DEFAULT 1;
   CREATE INDEX IF NOT EXISTS history_account_time_idx ON lakeload_bench.history(account_id, created_at DESC);
   CREATE TABLE IF NOT EXISTS lakeload_bench.orders (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(), account_id INTEGER NOT NULL, status TEXT NOT NULL DEFAULT 'created',
@@ -168,9 +192,10 @@ function dbsqlSetup(namespace: string) {
   ];
 }
 
-const RUN_SELECT = `SELECT id, scenario, engine, status, concurrency, duration_seconds, ramp_seconds,
+const RUN_SELECT = `SELECT id, scenario, engine, status, concurrency, duration_seconds, ramp_seconds,warmup_seconds,seed,
   execution_model, target_rps, requested_by, created_at, started_at, completed_at, total_operations,
-  total_errors, p50_ms, p95_ms, p99_ms, error_message, environment FROM lakeload_control.run`;
+  total_errors,dropped_operations,query_errors,measurement_started_at,methodology_version,
+  p50_ms, p95_ms, p99_ms, error_message, environment FROM lakeload_control.run`;
 
 function actor(req: Request) {
   return req.header('x-forwarded-email') ?? 'local-operator';
@@ -239,6 +264,11 @@ export async function setupLakeLoadRoutes(appkit: AppKitServices) {
     logger: { error: true, warn: true },
   });
   await ensureLakebaseBenchmarkSchema(targetPool);
+  await targetPool.query(`UPDATE lakeload_bench.dataset_marker SET
+    account_rows=COALESCE(account_rows,(SELECT COUNT(*) FROM lakeload_bench.account)),
+    product_rows=COALESCE(product_rows,(SELECT COUNT(*) FROM lakeload_bench.product)),
+    history_rows=COALESCE(history_rows,(SELECT COUNT(*) FROM lakeload_bench.history))
+    WHERE id=1`);
   const lakebaseEngine = new LoadEngine(targetPool, appkit.lakebase);
   const dbsqlEngine = new DbsqlEngine(warehouseAnalytics, appkit.lakebase, () =>
     dataNamespace(selectedDataDestination)
@@ -366,9 +396,9 @@ export async function setupLakeLoadRoutes(appkit: AppKitServices) {
         const [runs, target, operations, resets] = await Promise.all([
           appkit.lakebase.query(`${RUN_SELECT} ORDER BY created_at DESC LIMIT 50`),
           targetPool.query(`SELECT current_database() AS database, current_setting('server_version') AS postgres_version,
-            (SELECT COUNT(*)::int FROM lakeload_bench.account) AS accounts,
-            (SELECT COUNT(*)::int FROM lakeload_bench.product) AS products,
-            (SELECT COUNT(*)::int FROM lakeload_bench.history) AS history_rows`),
+            COALESCE((SELECT account_rows FROM lakeload_bench.dataset_marker WHERE id=1),0)::int AS accounts,
+            COALESCE((SELECT product_rows FROM lakeload_bench.dataset_marker WHERE id=1),0)::int AS products,
+            COALESCE((SELECT history_rows FROM lakeload_bench.dataset_marker WHERE id=1),0)::int AS history_rows`),
           appkit.lakebase.query(
             `SELECT id,kind,branch_name,source_branch,phase,create_compute,status,message,requested_by,
                     created_at,completed_at FROM lakeload_control.branch_operation ORDER BY created_at DESC LIMIT 20`
@@ -685,6 +715,46 @@ export async function setupLakeLoadRoutes(appkit: AppKitServices) {
       }
     });
 
+    app.get('/api/lakeload/runs/:id/export', async (req, res) => {
+      try {
+        const [run, metrics] = await Promise.all([
+          appkit.lakebase.query(`${RUN_SELECT} WHERE id=$1`, [req.params.id]),
+          metricsFor(appkit.lakebase, req.params.id),
+        ]);
+        if (!run.rows[0]) return void res.status(404).json({ error: 'Run not found' });
+        const runRow = run.rows[0];
+        const definition = scenarioById.get(String(runRow.scenario) as ScenarioId);
+        const format = req.query.format === 'csv' ? 'csv' : 'json';
+        const filename = `lakeload-${String(runRow.scenario)}-${req.params.id.slice(0, 8)}`;
+        res.setHeader('Content-Disposition', `attachment; filename="${filename}.${format}"`);
+        if (format === 'csv') {
+          res.type('text/csv').send(metricsCsv(metrics.rows));
+          return;
+        }
+        res.type('application/json').send(
+          JSON.stringify(
+            {
+              exported_at: new Date().toISOString(),
+              methodology: {
+                version: runRow.methodology_version,
+                latency: 'client-observed successful request latency',
+                throughput: 'successful completions divided by actual sample width',
+                errors: 'query failures plus load-generator admission drops',
+                percentiles: 'exact nearest-rank values; warm-up excluded from headline summary',
+              },
+              scenario: definition ?? null,
+              run: runRow,
+              metrics: metrics.rows,
+            },
+            null,
+            2
+          )
+        );
+      } catch (error) {
+        res.status(500).json({ error: `Evidence export failed: ${errorMessage(error)}` });
+      }
+    });
+
     app.post('/api/lakeload/runs', async (req, res) => {
       if (resetBusy()) return void res.status(409).json({ error: 'Hard reset is in progress' });
       const parsed = RunRequest.safeParse(req.body);
@@ -699,29 +769,46 @@ export async function setupLakeLoadRoutes(appkit: AppKitServices) {
         });
       try {
         const config = parsed.data;
+        const warehouse = (await getWarehouses().catch(() => [])).find(
+          (candidate) => candidate.id === selectedWarehouseId
+        );
         const created = await appkit.lakebase.query(
           `INSERT INTO lakeload_control.run
-           (scenario,engine,concurrency,duration_seconds,ramp_seconds,execution_model,target_rps,requested_by,config,environment)
-           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9::jsonb,$10::jsonb) RETURNING id`,
+           (scenario,engine,concurrency,duration_seconds,ramp_seconds,warmup_seconds,seed,
+            execution_model,target_rps,requested_by,config,environment,methodology_version)
+            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11::jsonb,$12::jsonb,'v3') RETURNING id`,
           [
             definition.id,
             definition.engine,
             config.concurrency,
             config.durationSeconds,
             config.rampSeconds,
+            config.warmupSeconds,
+            config.seed,
             config.executionModel,
             config.targetRps ?? null,
             actor(req),
             JSON.stringify(config),
             JSON.stringify({
-              seed: 424242,
+              methodology_version: 'v3',
+              seed: config.seed,
+              warmup_seconds: config.warmupSeconds,
+              pre_measure_seconds: Math.max(config.warmupSeconds, config.rampSeconds),
+              measured_seconds: config.durationSeconds,
+              cache_policy: config.warmupSeconds > 0 ? 'warm steady state' : 'first query included',
+              latency_scope: 'client-observed successful request latency',
+              error_scope: 'query failures plus admission drops',
+              rate_scope: 'completed operations normalized by actual sample width',
+              dataset: { accounts: 1_000_000, products: 10_000, history_rows: 5_000_000 },
               catalog: selectedDataDestination.catalog,
               schema: selectedDataDestination.schema,
               endpoint: endpoint.split('/').slice(-1)[0],
+              target_pool_size: Number(process.env.TARGET_POOL_SIZE ?? '80'),
               sql_warehouse_id: selectedWarehouseId,
-              sql_warehouse_name:
-                warehousesCache?.value.find((warehouse) => warehouse.id === selectedWarehouseId)?.name ??
-                selectedWarehouseId,
+              sql_warehouse_name: warehouse?.name ?? selectedWarehouseId,
+              sql_warehouse_size: warehouse?.clusterSize ?? 'unknown',
+              sql_warehouse_type: warehouse?.serverless ? 'serverless' : (warehouse?.warehouseType ?? 'unknown'),
+              sql_warehouse_state_at_start: warehouse?.state ?? 'unknown',
             }),
           ]
         );
@@ -744,9 +831,11 @@ export async function setupLakeLoadRoutes(appkit: AppKitServices) {
     });
 
     app.post('/api/lakeload/verify-invariant', async (_req, res) => {
-      const result = await targetPool.query(`SELECT SUM(balance)::text AS total_balance,
-        COUNT(*) FILTER (WHERE balance < 0)::int AS negative_accounts FROM lakeload_bench.account`);
-      res.json({ ...result.rows[0], expectedTotal: '124995000.00' });
+      const result = await targetPool.query(`SELECT SUM(a.balance)::text AS total_balance,
+        COUNT(*) FILTER (WHERE a.balance < 0)::int AS negative_accounts,
+        (SELECT expected_balance::text FROM lakeload_bench.dataset_marker WHERE id=1) AS expected_total
+        FROM lakeload_bench.account a`);
+      res.json(result.rows[0]);
     });
   });
 }
@@ -998,9 +1087,49 @@ async function metricsFor(control: Queryable, runId: string) {
     `SELECT recorded_at,elapsed_seconds,active_users,operations,errors,reads,writes,
     complex_queries,p50_ms,p95_ms,p99_ms,database_tps,commits,rollbacks,rows_inserted,rows_updated,
     rows_deleted,connections_active,connections_idle,connections_total,locks_waiting,locks_total,
-    cache_hit_pct,database_bytes FROM lakeload_control.run_metric WHERE run_id=$1 ORDER BY recorded_at`,
+    cache_hit_pct,database_bytes,interval_ms,throughput_rps,offered,dropped,query_errors,mean_ms,max_ms,
+    phase,target_rps FROM lakeload_control.run_metric WHERE run_id=$1 ORDER BY recorded_at`,
     [runId]
   );
+}
+
+function metricsCsv(rows: Record<string, unknown>[]) {
+  const columns = [
+    'recorded_at',
+    'elapsed_seconds',
+    'phase',
+    'interval_ms',
+    'active_users',
+    'offered',
+    'operations',
+    'throughput_rps',
+    'errors',
+    'query_errors',
+    'dropped',
+    'p50_ms',
+    'p95_ms',
+    'p99_ms',
+    'mean_ms',
+    'max_ms',
+    'database_tps',
+    'connections_active',
+    'connections_idle',
+    'connections_total',
+    'locks_waiting',
+    'cache_hit_pct',
+  ];
+  const escape = (input: unknown) => {
+    const text =
+      input === null || input === undefined
+        ? ''
+        : input instanceof Date
+          ? input.toISOString()
+        : typeof input === 'string' || typeof input === 'number' || typeof input === 'boolean'
+          ? String(input)
+          : JSON.stringify(input);
+    return /[",\n]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
+  };
+  return [columns.join(','), ...rows.map((row) => columns.map((column) => escape(row[column])).join(','))].join('\n');
 }
 
 async function ensureLakebaseBenchmarkSchema(target: Queryable) {
@@ -1009,20 +1138,27 @@ async function ensureLakebaseBenchmarkSchema(target: Queryable) {
 
 async function prepareLakebase(target: Queryable) {
   await ensureLakebaseBenchmarkSchema(target);
-  await target.query(`INSERT INTO lakeload_bench.dataset_marker(id,schema_version,seed) VALUES(1,2,424242)
+  const marker = await target.query('SELECT schema_version FROM lakeload_bench.dataset_marker WHERE id=1');
+  if (marker.rows.length > 0 && Number(marker.rows[0].schema_version) < 3) {
+    await target.query(`TRUNCATE TABLE lakeload_bench.orders,lakeload_bench.history,lakeload_bench.product,
+      lakeload_bench.account RESTART IDENTITY CASCADE`);
+  }
+  await target.query(`INSERT INTO lakeload_bench.dataset_marker(id,schema_version,seed) VALUES(1,3,424242)
     ON CONFLICT(id) DO UPDATE SET schema_version=EXCLUDED.schema_version, seed=EXCLUDED.seed, prepared_at=NOW()`);
   await target.query(`INSERT INTO lakeload_bench.account(id,region,balance)
-    SELECT id,(ARRAY['APAC','AMER','EMEA'])[1+(id%3)],10000+(id%5000) FROM generate_series(1,10000) id
+    SELECT id,(ARRAY['APAC','AMER','EMEA'])[1+(id%3)],10000+(id%5000) FROM generate_series(1,1000000) id
     ON CONFLICT(id) DO NOTHING`);
   await target.query(`INSERT INTO lakeload_bench.product(id,category,title,description,price)
     SELECT id,(ARRAY['Compute','Storage','AI','Platform'])[1+(id%4)],'Product '||id,
-    'Deterministic benchmark product '||id,5+(id%995) FROM generate_series(1,1000) id
+    'Deterministic benchmark product '||id,5+(id%995) FROM generate_series(1,10000) id
     ON CONFLICT(id) DO UPDATE SET title=EXCLUDED.title,description=EXCLUDED.description`);
+  await target.query(`UPDATE lakeload_bench.dataset_marker SET expected_balance=(
+    SELECT SUM(balance) FROM lakeload_bench.account) WHERE id=1`);
 }
 
 async function prepareLakebaseAnalyticalHistory(target: Queryable) {
-  await target.query(`INSERT INTO lakeload_bench.history(id,account_id,counterparty_id,amount,created_at)
-    SELECT id,1+MOD(id::bigint*7919,10000),1+MOD(id::bigint*104729,10000),
+  await target.query(`INSERT INTO lakeload_bench.history(id,account_id,counterparty_id,product_id,amount,created_at)
+    SELECT id,1+MOD(id::bigint*7919,1000000),1+MOD(id::bigint*104729,1000000),1+MOD(id::bigint,10000),
            ((MOD(id,20001)-10000)/100.0)::numeric(10,2),
            NOW()-(MOD(id::bigint,2592000) * INTERVAL '1 second')
     FROM generate_series(1,5000000) id
@@ -1030,6 +1166,11 @@ async function prepareLakebaseAnalyticalHistory(target: Queryable) {
   await target.query(`SELECT setval(pg_get_serial_sequence('lakeload_bench.history','id'),
     GREATEST((SELECT COALESCE(MAX(id),1) FROM lakeload_bench.history),1),true)`);
   await target.query('ANALYZE lakeload_bench.history');
+  await target.query(`UPDATE lakeload_bench.dataset_marker SET
+    account_rows=(SELECT COUNT(*) FROM lakeload_bench.account),
+    product_rows=(SELECT COUNT(*) FROM lakeload_bench.product),
+    history_rows=(SELECT COUNT(*) FROM lakeload_bench.history)
+    WHERE id=1`);
 }
 
 async function getReadiness(

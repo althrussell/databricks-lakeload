@@ -40,14 +40,14 @@ test.describe('deployed engine comparison', () => {
 
     await expect(dbsqlLane.getByText('running', { exact: true })).toBeVisible({ timeout: 35_000 });
     await expect(dbsqlLane.locator('svg[aria-label*="updated every second"]').first()).toBeVisible();
-    await expect(lakebaseLane.getByText('completed', { exact: true })).toBeVisible();
-    await expect(dbsqlLane.getByText('completed', { exact: true })).toBeVisible({ timeout: 35_000 });
+    await expect(lakebaseLane.locator('.status-completed')).toBeVisible();
+    await expect(dbsqlLane.locator('.status-completed')).toBeVisible({ timeout: 35_000 });
 
     const scorecard = page.getByRole('table', { name: 'Lakebase and DBSQL result comparison' });
     await expect(scorecard).toBeVisible();
     const throughputRow = scorecard.getByRole('row').filter({ hasText: 'Average throughput' });
     await expect(throughputRow).not.toContainText('—');
-    await expect(page.getByText(/recorded .* lower p95 in this run/i)).toBeVisible();
+    await expect(page.getByText(/P95: .* lower/i)).toBeVisible();
     await page.screenshot({ path: testInfo.outputPath('oltp-side-by-side-completed.png'), fullPage: true });
   });
 
@@ -69,13 +69,13 @@ test.describe('deployed engine comparison', () => {
     const lakebaseLane = page.locator('.comparison-lane.lakebase');
     const dbsqlLane = page.locator('.comparison-lane.dbsql');
     await expect(lakebaseLane.getByText('running', { exact: true })).toBeVisible({ timeout: 15_000 });
-    await expect(lakebaseLane.getByText('completed', { exact: true })).toBeVisible({ timeout: 70_000 });
+    await expect(lakebaseLane.locator('.status-completed')).toBeVisible({ timeout: 70_000 });
     await expect(dbsqlLane.getByText('running', { exact: true })).toBeVisible({ timeout: 20_000 });
-    await expect(dbsqlLane.getByText('completed', { exact: true })).toBeVisible({ timeout: 70_000 });
+    await expect(dbsqlLane.locator('.status-completed')).toBeVisible({ timeout: 70_000 });
 
     const scorecard = page.getByRole('table', { name: 'Lakebase and DBSQL result comparison' });
     await expect(scorecard.getByRole('row').filter({ hasText: 'Completed operations' })).not.toContainText('—');
-    await expect(page.getByText(/recorded .* lower p95 in this run/i)).toBeVisible();
+    await expect(page.getByText(/P95: .* lower/i)).toBeVisible();
     await page.screenshot({ path: testInfo.outputPath('olap-side-by-side-completed.png'), fullPage: true });
   });
 

@@ -22,4 +22,14 @@ describe('LatencyHistogram', () => {
     expect(snapshot.count).toBe(0);
     expect(snapshot.counts.every((value) => value === 0)).toBe(true);
   });
+
+  it('reports measured percentiles rather than bucket ceilings', () => {
+    const histogram = new LatencyHistogram();
+    [11, 12, 13, 14, 16, 17, 18, 19, 35, 36].forEach((value) => histogram.observe(value));
+    const snapshot = histogram.snapshot();
+
+    expect(snapshot.p50Ms).toBe(16);
+    expect(snapshot.p95Ms).toBe(36);
+    expect(snapshot.p99Ms).toBe(36);
+  });
 });

@@ -112,37 +112,38 @@ def run_worker(
                             CROSS JOIN lakeload_bench.product p
                             WHERE a.id = %s AND p.id = %s
                             """,
-                            (rng.randint(1, 10_000), rng.randint(1, 1_000)),
+                            (rng.randint(1, 1_000_000), rng.randint(1, 10_000)),
                         )
                         cursor.fetchone()
                 elif operation == "complex":
-                    start_id = rng.randint(1, 9_000)
+                    account_id = rng.randint(1, 1_000_000)
                     with connection.cursor() as cursor:
                         cursor.execute(
                             """
                             SELECT a.region, COUNT(h.id), COALESCE(AVG(ABS(h.amount)), 0)
                             FROM lakeload_bench.account a
-                            LEFT JOIN (
-                              SELECT id, account_id, amount
+                            LEFT JOIN LATERAL (
+                              SELECT id, amount
                               FROM lakeload_bench.history
-                              ORDER BY created_at DESC LIMIT 1000
-                            ) h ON h.account_id = a.id
-                            WHERE a.id BETWEEN %s AND %s
+                              WHERE account_id = a.id
+                              ORDER BY created_at DESC LIMIT 20
+                            ) h ON TRUE
+                            WHERE a.id = %s
                             GROUP BY a.region ORDER BY COUNT(h.id) DESC
                             """,
-                            (start_id, min(10_000, start_id + 1_000)),
+                            (account_id,),
                         )
                         cursor.fetchall()
                 else:
-                    source = rng.randint(1, 10_000)
-                    target = source % 10_000 + 1
+                    source = rng.randint(1, 1_000_000)
+                    target = source % 1_000_000 + 1
                     amount = rng.randint(1, 1_000) / 100
                     with connection.transaction(), connection.cursor() as cursor:
                         cursor.execute("UPDATE lakeload_bench.account SET balance = balance - %s WHERE id = %s", (amount, source))
                         cursor.execute("UPDATE lakeload_bench.account SET balance = balance + %s WHERE id = %s", (amount, target))
                         cursor.execute(
-                            "INSERT INTO lakeload_bench.history (account_id, counterparty_id, amount) VALUES (%s, %s, %s)",
-                            (source, target, amount),
+                            "INSERT INTO lakeload_bench.history (account_id, counterparty_id, product_id, amount) VALUES (%s, %s, 1 + MOD(%s - 1, 10000), %s)",
+                            (source, target, target, amount),
                         )
                 metrics.record((time.perf_counter() - started) * 1_000, True)
             except Exception:

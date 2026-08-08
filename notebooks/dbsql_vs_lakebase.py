@@ -5,7 +5,7 @@
 # MAGIC This notebook runs two paired comparisons over deterministic LakeLoad data:
 # MAGIC
 # MAGIC 1. One indexed account lookup, repeated against Lakebase and a Delta table through DBSQL.
-# MAGIC 2. One large aggregation against Delta through DBSQL, with the bounded operational equivalent in Lakebase.
+# MAGIC 2. The same five-million-row scan and dimensional aggregation on both engines.
 # MAGIC
 # MAGIC The goal is not to declare one engine universally faster. It shows why applications use Lakebase for concurrent OLTP and DBSQL for OLAP. Record the warehouse size, Lakebase CU range, cache state, concurrency, and data scale with every result.
 
@@ -111,21 +111,30 @@ connection = psycopg.connect(
 # MAGIC %md
 # MAGIC ## Pair 1: application lookup
 # MAGIC
-# MAGIC Lakebase uses a PostgreSQL primary-key index and a persistent session. DBSQL filters the equivalent one-million-row Delta table. This comparison demonstrates serving overhead; it is not an OLAP benchmark.
+# MAGIC Lakebase uses PostgreSQL primary-key indexes and a persistent session. DBSQL receives the same account-and-product key lookup over equivalent one-million/ten-thousand-row tables. This comparison demonstrates serving overhead; it is not an OLAP benchmark.
 
 # COMMAND ----------
 
 account_id = 424242
+product_id = 4242
 
 
 def lakebase_lookup() -> None:
     with connection.cursor() as cursor:
-        cursor.execute("SELECT id, region, balance FROM lakeload_bench.account WHERE id = %s", (account_id % 10_000 + 1,))
+        cursor.execute("""
+            SELECT a.balance, a.region, p.price
+            FROM lakeload_bench.account a CROSS JOIN lakeload_bench.product p
+            WHERE a.id = %s AND p.id = %s
+        """, (account_id, product_id))
         cursor.fetchone()
 
 
 def dbsql_lookup() -> None:
-    dbsql(f"SELECT id, region, balance FROM {DBSQL_NAMESPACE}.lakeload_account WHERE id = {account_id}")
+    dbsql(f"""
+        SELECT a.balance, a.region, p.price
+        FROM {DBSQL_NAMESPACE}.lakeload_account a CROSS JOIN {DBSQL_NAMESPACE}.lakeload_product p
+        WHERE a.id = {account_id} AND p.id = {product_id}
+    """)
 
 
 lakebase_lookup()
@@ -141,16 +150,18 @@ display(spark.createDataFrame([result.row() for result in lookup_results], "engi
 # MAGIC %md
 # MAGIC ## Pair 2: analytical aggregation
 # MAGIC
-# MAGIC DBSQL scans five million Delta rows, joins the product dimension, and aggregates by region and category. The Lakebase query is deliberately bounded to the most recent 1,000 operational events. Running the unbounded analytical scan on the OLTP endpoint would compete with application transactions.
+# MAGIC Both engines scan the same five million logical history rows, join the same account and product dimensions, and aggregate by region and category. This is intentionally a worst-fit query for an OLTP engine and a best-fit query for DBSQL.
 
 # COMMAND ----------
 
 dbsql_olap = f"""
-SELECT h.region, p.category, COUNT(*) AS events, SUM(ABS(h.amount)) AS gross_amount,
+SELECT a.region, p.category, COUNT(*) AS events, SUM(ABS(h.amount)) AS gross_amount,
        APPROX_COUNT_DISTINCT(h.account_id) AS active_accounts
 FROM {DBSQL_NAMESPACE}.lakeload_history h
-JOIN {DBSQL_NAMESPACE}.lakeload_product p ON p.id = pmod(h.product_id, 10000) + 1
-GROUP BY h.region, p.category ORDER BY gross_amount DESC
+JOIN {DBSQL_NAMESPACE}.lakeload_account a ON a.id = h.account_id
+JOIN {DBSQL_NAMESPACE}.lakeload_product p ON p.id = h.product_id
+WHERE h.id <= 5000000
+GROUP BY a.region, p.category ORDER BY gross_amount DESC
 """
 
 
@@ -158,26 +169,26 @@ def run_dbsql_olap() -> None:
     dbsql(dbsql_olap)
 
 
-def run_lakebase_bounded() -> None:
+def run_lakebase_olap() -> None:
     with connection.cursor() as cursor:
         cursor.execute("""
-            SELECT a.region, COUNT(h.id), COALESCE(AVG(ABS(h.amount)), 0)
-            FROM lakeload_bench.account a
-            LEFT JOIN (
-              SELECT id, account_id, amount FROM lakeload_bench.history
-              ORDER BY created_at DESC LIMIT 1000
-            ) h ON h.account_id = a.id
-            WHERE a.id BETWEEN 1 AND 1000
-            GROUP BY a.region ORDER BY COUNT(h.id) DESC
+            SELECT a.region, p.category, COUNT(*) AS events,
+                   SUM(ABS(h.amount)) AS gross_amount,
+                   COUNT(DISTINCT h.account_id) AS active_accounts
+            FROM lakeload_bench.history h
+            JOIN lakeload_bench.account a ON a.id = h.account_id
+            JOIN lakeload_bench.product p ON p.id = h.product_id
+            WHERE h.id <= 5000000
+            GROUP BY a.region, p.category ORDER BY gross_amount DESC
         """)
         cursor.fetchall()
 
 
 run_dbsql_olap()
-run_lakebase_bounded()
+run_lakebase_olap()
 analysis_results = [
     Result("DBSQL", "Five-million-row scan and join", measure(run_dbsql_olap, max(3, ITERATIONS // 4))),
-    Result("Lakebase", "Bounded operational aggregate", measure(run_lakebase_bounded)),
+    Result("Lakebase", "Five-million-row scan and join", measure(run_lakebase_olap, max(3, ITERATIONS // 4))),
 ]
 display(spark.createDataFrame([result.row() for result in analysis_results], "engine string, workload string, iterations int, mean_ms double, p50_ms double, p95_ms double, p99_ms double, cache_state string"))
 

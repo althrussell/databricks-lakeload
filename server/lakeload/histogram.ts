@@ -1,5 +1,10 @@
+// Persisted buckets are deliberately compact, while headline percentiles are
+// calculated from the observed values. The previous Fibonacci buckets made a
+// 35 ms request appear as 55 ms and were too coarse for an OLTP benchmark.
 const BOUNDS_MS = [
-  1, 2, 3, 5, 8, 13, 21, 34, 55, 89, 144, 233, 377, 610, 987, 1597, 2584, 4181, 6765, 10946, 30000,
+  0.25, 0.5, 0.75, 1, 1.5, 2, 3, 4, 5, 7.5, 10, 15, 20, 30, 40, 50, 75, 100,
+  150, 200, 300, 500, 750, 1000, 1500, 2000, 3000, 5000, 7500, 10000, 15000,
+  30000, 60000, 120000,
 ] as const;
 
 export interface HistogramSnapshot {
@@ -16,6 +21,7 @@ export interface HistogramSnapshot {
 
 export class LatencyHistogram {
   private counts = BOUNDS_MS.map(() => 0);
+  private values: number[] = [];
   private count = 0;
   private sumMs = 0;
   private minMs = Number.POSITIVE_INFINITY;
@@ -25,6 +31,7 @@ export class LatencyHistogram {
     const value = Math.max(0, valueMs);
     const index = BOUNDS_MS.findIndex((bound) => value <= bound);
     this.counts[index === -1 ? this.counts.length - 1 : index] += 1;
+    this.values.push(value);
     this.count += 1;
     this.sumMs += value;
     this.minMs = Math.min(this.minMs, value);
@@ -47,6 +54,7 @@ export class LatencyHistogram {
 
   reset() {
     this.counts = BOUNDS_MS.map(() => 0);
+    this.values = [];
     this.count = 0;
     this.sumMs = 0;
     this.minMs = Number.POSITIVE_INFINITY;
@@ -55,12 +63,8 @@ export class LatencyHistogram {
 
   private quantile(q: number) {
     if (this.count === 0) return 0;
-    const target = Math.max(1, Math.ceil(this.count * q));
-    let cumulative = 0;
-    for (let index = 0; index < this.counts.length; index += 1) {
-      cumulative += this.counts[index];
-      if (cumulative >= target) return BOUNDS_MS[index];
-    }
-    return BOUNDS_MS[BOUNDS_MS.length - 1];
+    const ordered = [...this.values].sort((left, right) => left - right);
+    const index = Math.min(ordered.length - 1, Math.max(0, Math.ceil(ordered.length * q) - 1));
+    return Math.round(ordered[index] * 100) / 100;
   }
 }

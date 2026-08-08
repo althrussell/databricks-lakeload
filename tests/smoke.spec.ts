@@ -35,6 +35,8 @@ test('LakeLoad renders the workload console', async ({ page }) => {
   await expect(page.getByRole('heading', { name: 'Lakebase and DBSQL, side by side', exact: true })).toBeVisible();
   await expect(page.getByRole('button', { name: /Indexed request serving/ })).toBeVisible();
   await expect(page.getByRole('heading', { name: 'Winner and score', exact: true })).toBeVisible();
+  await expect(page.locator('.evidence-quality')).toContainText(/Decision-grade pair|Not yet decision-grade/);
+  await expect(page.locator('.repeatability-panel')).toContainText(/Repeatability/);
   await expect(page.locator('.comparison-verdict')).toContainText(/wins|Near tie|No single winner|select a winner/);
   await expect(page.getByText('Ratings use the selected workload and visible guardrails', { exact: false })).toBeVisible();
   await expect(page.getByText('Stretch goal', { exact: true }).first()).toBeVisible();

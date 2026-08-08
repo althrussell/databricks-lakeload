@@ -17,14 +17,16 @@ LakeLoad is a real-time OLTP, OLAP, and LTAP benchmark suite for Databricks Lake
 - a guarded Hard Reset that purges only LakeLoad benchmark data, history, telemetry, snapshots, and restores
 - copy-on-write snapshots during active load and non-destructive restore into isolated branches with their own compute
 - deterministic PostgreSQL seed data and persistent run history
+- decision-grade comparison fingerprints, warm-up exclusion, repeatability checks, and JSON/CSV evidence exports
+- offered-rate and admission-drop telemetry so saturation is visible instead of hidden
 - short-lived Lakebase OAuth credentials with automatic pool rotation
 - isolation between control telemetry and the database endpoint under test
 
 ## Architecture
 
-The Databricks App stores run definitions and one-second metric buckets in the `production` branch of the `lakeload` project. Workload traffic is sent to the independent `benchmark` branch and compute endpoint. Snapshot and restore branches are copy-on-write and never replace the active benchmark branch. The App service principal receives scoped connect/run access through declared resources plus project `CAN_MANAGE` from the installer; no database password is stored.
+The Databricks App stores run definitions and approximately one-second metric buckets in the `production` branch of the `lakeload` project. Every bucket records its actual width so rates remain accurate. Workload traffic is sent to the independent `benchmark` branch and compute endpoint. Snapshot and restore branches are copy-on-write and never replace the active benchmark branch. The App service principal receives scoped connect/run access through declared resources plus project `CAN_MANAGE` from the installer; no database password is stored.
 
-See the [customer replication guide](docs/customer-guide.md), [feature evaluation](docs/feature-evaluation.md), [validated labs results](docs/lab-results.md), and [full solution plan](docs/solution-plan.md).
+See the [customer replication guide](docs/customer-guide.md), [benchmark review](docs/benchmark-review.md), [feature evaluation](docs/feature-evaluation.md), [validated labs results](docs/lab-results.md), and [full solution plan](docs/solution-plan.md).
 
 ## Deploy from a clean workspace
 
