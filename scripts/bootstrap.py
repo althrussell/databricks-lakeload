@@ -10,6 +10,7 @@ from pathlib import Path
 from databricks.sdk import WorkspaceClient
 from databricks.sdk.errors import NotFound
 from databricks.sdk.service.catalog import PermissionsChange, Privilege
+from databricks.sdk.service.iam import AccessControlRequest, PermissionLevel
 from databricks.sdk.service.postgres import (
     Branch,
     BranchSpec,
@@ -127,6 +128,17 @@ def main() -> None:
         changes=[PermissionsChange(principal=principal, add=[Privilege.USE_CATALOG, Privilege.CREATE_SCHEMA])],
     )
     print(f"grant  USE CATALOG, CREATE SCHEMA on {args.catalog} to {principal}")
+    workspace.permissions.update(
+        "database-projects",
+        args.project,
+        access_control_list=[
+            AccessControlRequest(
+                service_principal_name=principal,
+                permission_level=PermissionLevel.CAN_MANAGE,
+            )
+        ],
+    )
+    print(f"grant  CAN MANAGE on Lakebase project {args.project} to {principal}")
 
     run(["databricks", "bundle", "run", "app", "-p", args.profile, "-t", args.target])
     app = workspace.apps.get(args.app)

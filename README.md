@@ -11,14 +11,15 @@ LakeLoad is a real-time OLTP, OLAP, and LTAP benchmark suite for Databricks Lake
 - Lakebase point reads, transactions, mixed traffic, and bounded operational joins
 - DBSQL point lookup, large scan/join, and analytical window scenarios
 - readiness and test definitions for CDF, synced tables, Search, OpenTelemetry, and a full closed-loop LTAP flow
-- live operations/second, p50/p95/p99 latency, errors, active users, and workload mix
+- one-second live charts for workload/database TPS, p50/p95/p99 latency, connections, row churn, workload mix, cache hit rate, and lock waits
+- copy-on-write snapshots during active load and non-destructive restore into isolated branches with their own compute
 - deterministic PostgreSQL seed data and persistent run history
 - short-lived Lakebase OAuth credentials with automatic pool rotation
 - isolation between control telemetry and the database endpoint under test
 
 ## Architecture
 
-The Databricks App stores run definitions and one-second metric buckets in the `production` branch of the `lakeload` project. Workload traffic is sent to the independent `benchmark` branch and compute endpoint. The App service principal receives `CAN_CONNECT_AND_CREATE` and `CAN_MANAGE_RUN` through declared resources; no database password is stored.
+The Databricks App stores run definitions and one-second metric buckets in the `production` branch of the `lakeload` project. Workload traffic is sent to the independent `benchmark` branch and compute endpoint. Snapshot and restore branches are copy-on-write and never replace the active benchmark branch. The App service principal receives scoped connect/run access through declared resources plus project `CAN_MANAGE` from the installer; no database password is stored.
 
 See the [customer replication guide](docs/customer-guide.md), [feature evaluation](docs/feature-evaluation.md), [validated labs results](docs/lab-results.md), and [full solution plan](docs/solution-plan.md).
 

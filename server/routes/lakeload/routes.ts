@@ -24,6 +24,13 @@ const RunRequest = z.object({
   targetRps: z.number().int().min(1).max(5_000).optional(),
 });
 
+const BranchRequest = z.object({
+  kind: z.enum(['snapshot', 'restore']),
+  sourceBranch: z.string().regex(/^projects\/[a-z0-9-]+\/branches\/[a-z0-9-]+$/),
+  branchId: z.string().regex(/^[a-z][a-z0-9-]{0,62}$/),
+  createCompute: z.boolean().default(false),
+});
+
 const CONTROL_SCHEMA_SQL = `
   CREATE SCHEMA IF NOT EXISTS lakeload_control;
   CREATE TABLE IF NOT EXISTS lakeload_control.run (
@@ -45,7 +52,27 @@ const CONTROL_SCHEMA_SQL = `
     complex_queries INTEGER NOT NULL, p50_ms DOUBLE PRECISION NOT NULL, p95_ms DOUBLE PRECISION NOT NULL,
     p99_ms DOUBLE PRECISION NOT NULL, histogram JSONB NOT NULL
   );
+  ALTER TABLE lakeload_control.run_metric ADD COLUMN IF NOT EXISTS database_tps INTEGER NOT NULL DEFAULT 0;
+  ALTER TABLE lakeload_control.run_metric ADD COLUMN IF NOT EXISTS commits INTEGER NOT NULL DEFAULT 0;
+  ALTER TABLE lakeload_control.run_metric ADD COLUMN IF NOT EXISTS rollbacks INTEGER NOT NULL DEFAULT 0;
+  ALTER TABLE lakeload_control.run_metric ADD COLUMN IF NOT EXISTS rows_inserted INTEGER NOT NULL DEFAULT 0;
+  ALTER TABLE lakeload_control.run_metric ADD COLUMN IF NOT EXISTS rows_updated INTEGER NOT NULL DEFAULT 0;
+  ALTER TABLE lakeload_control.run_metric ADD COLUMN IF NOT EXISTS rows_deleted INTEGER NOT NULL DEFAULT 0;
+  ALTER TABLE lakeload_control.run_metric ADD COLUMN IF NOT EXISTS connections_active INTEGER NOT NULL DEFAULT 0;
+  ALTER TABLE lakeload_control.run_metric ADD COLUMN IF NOT EXISTS connections_idle INTEGER NOT NULL DEFAULT 0;
+  ALTER TABLE lakeload_control.run_metric ADD COLUMN IF NOT EXISTS connections_total INTEGER NOT NULL DEFAULT 0;
+  ALTER TABLE lakeload_control.run_metric ADD COLUMN IF NOT EXISTS locks_waiting INTEGER NOT NULL DEFAULT 0;
+  ALTER TABLE lakeload_control.run_metric ADD COLUMN IF NOT EXISTS locks_total INTEGER NOT NULL DEFAULT 0;
+  ALTER TABLE lakeload_control.run_metric ADD COLUMN IF NOT EXISTS cache_hit_pct DOUBLE PRECISION NOT NULL DEFAULT 0;
+  ALTER TABLE lakeload_control.run_metric ADD COLUMN IF NOT EXISTS database_bytes BIGINT NOT NULL DEFAULT 0;
   CREATE INDEX IF NOT EXISTS run_metric_run_time_idx ON lakeload_control.run_metric(run_id, recorded_at);
+  CREATE TABLE IF NOT EXISTS lakeload_control.branch_operation (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(), kind TEXT NOT NULL, branch_name TEXT NOT NULL,
+    source_branch TEXT NOT NULL, operation_name TEXT, phase TEXT NOT NULL DEFAULT 'branch',
+    create_compute BOOLEAN NOT NULL DEFAULT FALSE, status TEXT NOT NULL DEFAULT 'queued',
+    message TEXT, requested_by TEXT NOT NULL, created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    completed_at TIMESTAMPTZ
+  );
 `;
 
 const BENCHMARK_SCHEMA_SQL = `
@@ -114,8 +141,11 @@ export async function setupLakeLoadRoutes(appkit: AppKitServices) {
   let host = process.env.TARGET_PGHOST;
   const database = process.env.TARGET_PGDATABASE ?? 'databricks_postgres';
   if (!endpoint) throw new Error('TARGET_LAKEBASE_ENDPOINT is required');
+  const projectName = endpoint.split('/').slice(0, 2).join('/');
+  const projectId = projectName.split('/')[1];
+  const workspaceClient = getWorkspaceClient({});
   if (!host) {
-    const endpointResource = (await getWorkspaceClient({}).apiClient.request({
+    const endpointResource = (await workspaceClient.apiClient.request({
       path: `/api/2.0/postgres/${endpoint}`,
       method: 'GET',
       headers: new Headers(),
@@ -138,18 +168,44 @@ export async function setupLakeLoadRoutes(appkit: AppKitServices) {
   await prepareLakebase(targetPool);
   const lakebaseEngine = new LoadEngine(targetPool, appkit.lakebase);
   const dbsqlEngine = new DbsqlEngine(appkit.analytics, appkit.lakebase);
+  let readinessCache: { updatedAt: number; value: Awaited<ReturnType<typeof getReadiness>> } | null = null;
+  let branchesCache: Record<string, unknown>[] = [];
+
+  const pendingOperations = await appkit.lakebase.query(
+    `SELECT id, operation_name, phase, branch_name, create_compute FROM lakeload_control.branch_operation
+     WHERE status IN ('queued','running') AND operation_name IS NOT NULL`
+  );
+  for (const operation of pendingOperations.rows) {
+    void monitorBranchOperation(appkit.lakebase, workspaceClient, operation).catch((error) =>
+      failBranchOperation(appkit.lakebase, String(operation.id), error)
+    );
+  }
 
   appkit.server.extend((app) => {
     app.get('/api/lakeload/overview', async (_req, res) => {
       try {
-        const [runs, target, readiness] = await Promise.all([
+        const [runs, target, operations] = await Promise.all([
           appkit.lakebase.query(`${RUN_SELECT} ORDER BY created_at DESC LIMIT 50`),
           targetPool.query(`SELECT current_database() AS database, current_setting('server_version') AS postgres_version,
             (SELECT COUNT(*)::int FROM lakeload_bench.account) AS accounts,
             (SELECT COUNT(*)::int FROM lakeload_bench.product) AS products,
             (SELECT COUNT(*)::int FROM lakeload_bench.history) AS history_rows`),
-          getReadiness(targetPool, appkit.analytics),
+          appkit.lakebase.query(
+            `SELECT id,kind,branch_name,source_branch,phase,create_compute,status,message,requested_by,
+                    created_at,completed_at FROM lakeload_control.branch_operation ORDER BY created_at DESC LIMIT 20`
+          ),
         ]);
+        try {
+          branchesCache = branchRows(
+            await postgresRequest(workspaceClient, `/api/2.0/postgres/${projectName}/branches`, 'GET')
+          );
+        } catch (error) {
+          // Control-plane telemetry must never interrupt the one-second workload metric stream.
+          console.warn('[lakeload] branch topology refresh failed; serving the last known topology', error);
+        }
+        if (!readinessCache || Date.now() - readinessCache.updatedAt > 30_000) {
+          readinessCache = { updatedAt: Date.now(), value: await getReadiness(targetPool, appkit.analytics) };
+        }
         const activeId = lakebaseEngine.activeRunId ?? dbsqlEngine.activeRunId;
         const metrics = activeId ? await metricsFor(appkit.lakebase, activeId) : { rows: [] };
         res.json({
@@ -158,8 +214,11 @@ export async function setupLakeLoadRoutes(appkit: AppKitServices) {
           activeRunId: activeId,
           activeMetrics: metrics.rows,
           target: (target.rows[0] ?? {}) as Record<string, unknown>,
-          readiness,
+          readiness: readinessCache.value,
+          branches: branchesCache,
+          branchOperations: operations.rows,
           endpoint: {
+            project: projectId,
             branch: endpoint.split('/')[3] ?? 'benchmark',
             endpoint: endpoint.split('/').slice(-1)[0] ?? 'primary',
             poolSize: Number(process.env.TARGET_POOL_SIZE ?? '80'),
@@ -188,6 +247,89 @@ export async function setupLakeLoadRoutes(appkit: AppKitServices) {
       }
     });
 
+    app.post('/api/lakeload/branches', async (req, res) => {
+      const parsed = BranchRequest.safeParse(req.body);
+      if (!parsed.success)
+        return void res.status(400).json({ error: 'Invalid branch request', issues: parsed.error.issues });
+      const input = parsed.data;
+      if (!input.sourceBranch.startsWith(`${projectName}/branches/`))
+        return void res.status(400).json({ error: 'Source branch must belong to the LakeLoad project' });
+      const requiredPrefix = input.kind === 'snapshot' ? 'snapshot-' : 'restore-';
+      if (!input.branchId.startsWith(requiredPrefix))
+        return void res.status(400).json({ error: `${input.kind} branch IDs must start with ${requiredPrefix}` });
+      let operationId: string | null = null;
+      try {
+        const branchName = `${projectName}/branches/${input.branchId}`;
+        const existing = await appkit.lakebase.query(
+          `SELECT 1 FROM lakeload_control.branch_operation WHERE branch_name=$1 AND status IN ('queued','running')`,
+          [branchName]
+        );
+        if (existing.rows.length > 0)
+          return void res.status(409).json({ error: 'A branch operation is already active for this name' });
+        const created = await appkit.lakebase.query(
+          `INSERT INTO lakeload_control.branch_operation
+           (kind,branch_name,source_branch,create_compute,requested_by)
+           VALUES($1,$2,$3,$4,$5) RETURNING id`,
+          [input.kind, branchName, input.sourceBranch, input.createCompute, actor(req)]
+        );
+        const operation = await postgresRequest(
+          workspaceClient,
+          `/api/2.0/postgres/${projectName}/branches`,
+          'POST',
+          { branch_id: input.branchId },
+          {
+            spec: {
+              source_branch: input.sourceBranch,
+              ...(input.kind === 'snapshot' ? { no_expiry: true } : { ttl: '86400s' }),
+            },
+          }
+        );
+        const operationName = operationNameFrom(operation);
+        operationId = String(created.rows[0].id);
+        await appkit.lakebase.query(
+          `UPDATE lakeload_control.branch_operation SET status='running',operation_name=$2,message=$3 WHERE id=$1`,
+          [
+            operationId,
+            operationName,
+            input.kind === 'snapshot' ? 'Capturing copy-on-write snapshot' : 'Restoring into an isolated branch',
+          ]
+        );
+        void monitorBranchOperation(appkit.lakebase, workspaceClient, {
+          id: operationId,
+          operation_name: operationName,
+          phase: 'branch',
+          branch_name: branchName,
+          create_compute: input.createCompute,
+        }).catch((error) => failBranchOperation(appkit.lakebase, operationId ?? '', error));
+        res.status(202).json({ operationId, branchName });
+      } catch (error) {
+        if (operationId) {
+          await appkit.lakebase.query(
+            `UPDATE lakeload_control.branch_operation SET status='failed',message=$2,completed_at=NOW() WHERE id=$1`,
+            [operationId, `Branch operation could not start: ${errorMessage(error)}`]
+          );
+        }
+        res.status(500).json({ error: `Branch operation could not start: ${errorMessage(error)}` });
+      }
+    });
+
+    app.delete('/api/lakeload/branches/:branchId', async (req, res) => {
+      const branchId = req.params.branchId;
+      if (!/^(snapshot|restore)-[a-z0-9-]+$/.test(branchId))
+        return void res.status(400).json({ error: 'Only LakeLoad snapshot and restore branches can be removed here' });
+      try {
+        const operation = await postgresRequest(
+          workspaceClient,
+          `/api/2.0/postgres/${projectName}/branches/${branchId}`,
+          'DELETE',
+          { purge: false }
+        );
+        res.status(202).json({ operationName: operationNameFrom(operation) });
+      } catch (error) {
+        res.status(500).json({ error: `Branch could not be removed: ${errorMessage(error)}` });
+      }
+    });
+
     app.get('/api/lakeload/runs/:id', async (req, res) => {
       try {
         const [run, metrics] = await Promise.all([
@@ -203,12 +345,17 @@ export async function setupLakeLoadRoutes(appkit: AppKitServices) {
 
     app.post('/api/lakeload/runs', async (req, res) => {
       const parsed = RunRequest.safeParse(req.body);
-      if (!parsed.success) return void res.status(400).json({ error: 'Invalid run configuration', issues: parsed.error.issues });
+      if (!parsed.success)
+        return void res.status(400).json({ error: 'Invalid run configuration', issues: parsed.error.issues });
       if (lakebaseEngine.activeRunId || dbsqlEngine.activeRunId)
         return void res.status(409).json({ error: 'Another run is active' });
       const definition = scenarioById.get(parsed.data.scenario as ScenarioId)!;
       if (!definition.runnable)
-        return void res.status(409).json({ error: `${definition.name} requires ${definition.prerequisite} setup. Use the readiness instructions first.` });
+        return void res
+          .status(409)
+          .json({
+            error: `${definition.name} requires ${definition.prerequisite} setup. Use the readiness instructions first.`,
+          });
       try {
         const config = parsed.data;
         const created = await appkit.lakebase.query(
@@ -225,13 +372,19 @@ export async function setupLakeLoadRoutes(appkit: AppKitServices) {
             config.targetRps ?? null,
             actor(req),
             JSON.stringify(config),
-            JSON.stringify({ seed: 424242, catalog: 'main', schema: 'lakeload', endpoint: endpoint.split('/').slice(-1)[0] }),
+            JSON.stringify({
+              seed: 424242,
+              catalog: 'main',
+              schema: 'lakeload',
+              endpoint: endpoint.split('/').slice(-1)[0],
+            }),
           ]
         );
         const runId = String(created.rows[0].id);
-        const task = definition.engine === 'dbsql'
-          ? dbsqlEngine.start(runId, config as DbsqlRunConfig)
-          : lakebaseEngine.start(runId, config as RunConfig);
+        const task =
+          definition.engine === 'dbsql'
+            ? dbsqlEngine.start(runId, config as DbsqlRunConfig)
+            : lakebaseEngine.start(runId, config as RunConfig);
         void task.catch((error) => console.error(`[lakeload] run ${runId} failed`, error));
         res.status(202).json({ runId });
       } catch (error) {
@@ -253,9 +406,151 @@ export async function setupLakeLoadRoutes(appkit: AppKitServices) {
   });
 }
 
+type WorkspaceClient = ReturnType<typeof getWorkspaceClient>;
+
+async function postgresRequest(
+  workspaceClient: WorkspaceClient,
+  path: string,
+  method: 'GET' | 'POST' | 'DELETE',
+  query?: Record<string, string | number | boolean>,
+  payload?: unknown
+) {
+  return workspaceClient.apiClient.request({
+    path,
+    method,
+    query,
+    headers: new Headers(payload ? { 'Content-Type': 'application/json' } : undefined),
+    raw: false,
+    payload,
+  });
+}
+
+function branchRows(response: unknown): Record<string, unknown>[] {
+  return collectionRows(response, 'branches');
+}
+
+function collectionRows(response: unknown, key: string): Record<string, unknown>[] {
+  const items = Array.isArray(response)
+    ? response
+    : response && typeof response === 'object' && key in response
+      ? (response as Record<string, unknown>)[key]
+      : [];
+  return Array.isArray(items)
+    ? items.filter((item): item is Record<string, unknown> => Boolean(item && typeof item === 'object'))
+    : [];
+}
+
+function operationNameFrom(response: unknown) {
+  if (!response || typeof response !== 'object' || !('name' in response) || typeof response.name !== 'string')
+    throw new Error('Lakebase did not return an operation name');
+  return response.name;
+}
+
+function booleanField(value: unknown) {
+  return value === true || value === 'true';
+}
+
+function stringField(value: unknown, fallback = '') {
+  return typeof value === 'string' || typeof value === 'number' ? String(value) : fallback;
+}
+
+async function monitorBranchOperation(
+  control: Queryable,
+  workspaceClient: WorkspaceClient,
+  operationRow: Record<string, unknown>
+) {
+  const id = String(operationRow.id);
+  const branchName = String(operationRow.branch_name);
+  let phase = stringField(operationRow.phase, 'branch');
+  let operationName = stringField(operationRow.operation_name);
+  const createCompute = booleanField(operationRow.create_compute);
+  for (let attempt = 0; attempt < 300; attempt += 1) {
+    const operation = await postgresRequest(workspaceClient, `/api/2.0/postgres/${operationName}`, 'GET');
+    const record = operation && typeof operation === 'object' ? (operation as Record<string, unknown>) : {};
+    if (record.done === true) {
+      if (record.error) {
+        const message =
+          record.error && typeof record.error === 'object'
+            ? JSON.stringify(record.error)
+            : stringField(record.error, 'Lakebase operation failed');
+        await control.query(
+          `UPDATE lakeload_control.branch_operation SET status='failed',message=$2,completed_at=NOW() WHERE id=$1`,
+          [id, message]
+        );
+        return;
+      }
+      if (phase === 'branch' && createCompute) {
+        const endpoints = collectionRows(
+          await postgresRequest(workspaceClient, `/api/2.0/postgres/${branchName}/endpoints`, 'GET'),
+          'endpoints'
+        );
+        if (endpoints.length > 0) {
+          await control.query(
+            `UPDATE lakeload_control.branch_operation SET status='completed',phase='compute',
+             message='Restore branch and dedicated compute are ready',completed_at=NOW() WHERE id=$1`,
+            [id]
+          );
+          return;
+        }
+        const endpointOperation = await postgresRequest(
+          workspaceClient,
+          `/api/2.0/postgres/${branchName}/endpoints`,
+          'POST',
+          { endpoint_id: 'primary' },
+          {
+            spec: {
+              endpoint_type: 'ENDPOINT_TYPE_READ_WRITE',
+              autoscaling_limit_min_cu: 0.5,
+              autoscaling_limit_max_cu: 1,
+              suspend_timeout_duration: '300s',
+            },
+          }
+        );
+        operationName = operationNameFrom(endpointOperation);
+        phase = 'compute';
+        await control.query(
+          `UPDATE lakeload_control.branch_operation SET phase='compute',operation_name=$2,
+           message='Starting isolated restore compute' WHERE id=$1`,
+          [id, operationName]
+        );
+        continue;
+      }
+      await control.query(
+        `UPDATE lakeload_control.branch_operation SET status='completed',message=$2,completed_at=NOW() WHERE id=$1`,
+        [id, phase === 'compute' ? 'Restore branch and compute are ready' : 'Snapshot branch is ready']
+      );
+      return;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 1_000));
+  }
+  await control.query(
+    `UPDATE lakeload_control.branch_operation SET status='failed',message='Operation exceeded the five-minute monitor window',
+     completed_at=NOW() WHERE id=$1`,
+    [id]
+  );
+}
+
+async function failBranchOperation(control: Queryable, id: string, error: unknown) {
+  console.error('[lakeload] branch operation failed', error);
+  if (!id) return;
+  try {
+    await control.query(
+      `UPDATE lakeload_control.branch_operation SET status='failed',message=$2,completed_at=NOW() WHERE id=$1`,
+      [id, errorMessage(error)]
+    );
+  } catch (updateError) {
+    console.error('[lakeload] could not persist branch operation failure', updateError);
+  }
+}
+
 async function metricsFor(control: Queryable, runId: string) {
-  return control.query(`SELECT recorded_at,elapsed_seconds,active_users,operations,errors,reads,writes,
-    complex_queries,p50_ms,p95_ms,p99_ms FROM lakeload_control.run_metric WHERE run_id=$1 ORDER BY recorded_at`, [runId]);
+  return control.query(
+    `SELECT recorded_at,elapsed_seconds,active_users,operations,errors,reads,writes,
+    complex_queries,p50_ms,p95_ms,p99_ms,database_tps,commits,rollbacks,rows_inserted,rows_updated,
+    rows_deleted,connections_active,connections_idle,connections_total,locks_waiting,locks_total,
+    cache_hit_pct,database_bytes FROM lakeload_control.run_metric WHERE run_id=$1 ORDER BY recorded_at`,
+    [runId]
+  );
 }
 
 async function prepareLakebase(target: Queryable) {
@@ -297,9 +592,38 @@ async function getReadiness(target: Queryable, analytics: AppKitServices['analyt
     { id: 'lakebase', label: 'Lakebase target', state: 'ready', detail: `Connected as ${postgresUser}` },
     { id: 'dbsql', label: 'DBSQL warehouse', state: dbsqlReady ? 'ready' : 'blocked', detail: dbsqlDetail },
     { id: 'catalog', label: 'Unity Catalog dataset', state: dbsqlReady ? 'ready' : 'blocked', detail: 'main.lakeload' },
-    { id: 'cdf', label: 'Lakebase CDF', state: cdfReady ? 'ready' : 'action', detail: cdfReady ? process.env.CDF_DELTA_TABLE : 'Enable the preview, set REPLICA IDENTITY FULL, and activate CDF in the Lakebase UI.' },
-    { id: 'sync', label: 'Synced table', state: process.env.SYNC_TABLE_NAME ? 'ready' : 'action', detail: process.env.SYNC_TABLE_NAME ?? 'Create the Delta-to-Lakebase synced table, then bind SELECT access to the app.' },
-    { id: 'search', label: 'Lakebase Search', state: searchReady ? 'ready' : 'action', detail: searchReady ? 'Search extensions installed' : pg.search_available ? 'Available but not enabled. Enabling Search restarts compute and cannot be reversed.' : 'Search packages are not available in this project.' },
-    { id: 'otel', label: 'OpenTelemetry', state: process.env.OTEL_EXPORTER_OTLP_ENDPOINT ? 'ready' : 'action', detail: process.env.OTEL_EXPORTER_OTLP_ENDPOINT ? 'OTLP exporter configured' : 'Configure an external OTLP collector in project settings.' },
+    {
+      id: 'cdf',
+      label: 'Lakebase CDF',
+      state: cdfReady ? 'ready' : 'action',
+      detail: cdfReady
+        ? process.env.CDF_DELTA_TABLE
+        : 'Enable the preview, set REPLICA IDENTITY FULL, and activate CDF in the Lakebase UI.',
+    },
+    {
+      id: 'sync',
+      label: 'Synced table',
+      state: process.env.SYNC_TABLE_NAME ? 'ready' : 'action',
+      detail:
+        process.env.SYNC_TABLE_NAME ?? 'Create the Delta-to-Lakebase synced table, then bind SELECT access to the app.',
+    },
+    {
+      id: 'search',
+      label: 'Lakebase Search',
+      state: searchReady ? 'ready' : 'action',
+      detail: searchReady
+        ? 'Search extensions installed'
+        : pg.search_available
+          ? 'Available but not enabled. Enabling Search restarts compute and cannot be reversed.'
+          : 'Search packages are not available in this project.',
+    },
+    {
+      id: 'otel',
+      label: 'OpenTelemetry',
+      state: process.env.OTEL_EXPORTER_OTLP_ENDPOINT ? 'ready' : 'action',
+      detail: process.env.OTEL_EXPORTER_OTLP_ENDPOINT
+        ? 'OTLP exporter configured'
+        : 'Configure an external OTLP collector in project settings.',
+    },
   ];
 }

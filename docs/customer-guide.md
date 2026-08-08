@@ -9,6 +9,7 @@ LakeLoad is a repeatable Databricks App for demonstrating Lakebase OLTP, DBSQL O
 - One serverless Lakeflow Job runner for distributed Lakebase load.
 - One DBSQL warehouse binding for Delta setup and OLAP scenarios.
 - One executable DBSQL-versus-Lakebase notebook job.
+- A copy-on-write Branch Lab for live snapshots and isolated restore branches.
 - Delta tables in `<catalog>.lakeload`: `account` (1 million rows), `product` (10,000 rows), and `history` (5 million rows).
 
 No database password is stored. The App and jobs mint short-lived OAuth database credentials.
@@ -47,11 +48,11 @@ A Databricks App cannot create and bind the Lakebase project that authenticates 
 
 The Setup page performs live checks.
 
-| State | Meaning | Operator action |
-|---|---|---|
-| Ready | The App can use the capability now. | None. |
+| State          | Meaning                                                                                                  | Operator action                                                 |
+| -------------- | -------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------- |
+| Ready          | The App can use the capability now.                                                                      | None.                                                           |
 | Setup required | The workspace supports the feature but an administrator must complete a preview or project-level action. | Follow the detail shown in the row and the feature steps below. |
-| Blocked | A required resource cannot be reached. | Correct the binding or permission, then reload. |
+| Blocked        | A required resource cannot be reached.                                                                   | Correct the binding or permission, then reload.                 |
 
 Preview features remain disabled until the readiness check passes. LakeLoad never enables an irreversible feature or restarts a project without an operator decision.
 
@@ -220,6 +221,34 @@ LakeLoad does not provision an external collector.
 7. Label cold-start and scale-to-zero measurements separately.
 8. Stop when the error guardrail is crossed. Saturation is a result, not a reason to keep increasing load.
 
+## Read the real-time console
+
+Every visible graph is driven by the same one-second metric stream for the selected active run. The console redraws throughput, latency, connection pressure, row churn, operation mix, and database health once per sample; the Branch Lab continues consuming that stream while control-plane branch operations are in progress.
+
+| Metric                            | Meaning                                                                                                                                                |
+| --------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Workload TPS                      | Successful application operations completed in that one-second interval.                                                                               |
+| Database tx/s                     | PostgreSQL commits plus rollbacks observed in the interval. This can exceed workload TPS because one workload operation may use multiple transactions. |
+| p50 / p95 / p99                   | End-to-end operation latency from the load generator.                                                                                                  |
+| Active / idle / total connections | Current PostgreSQL sessions for the benchmark database.                                                                                                |
+| Inserted / updated / deleted      | PostgreSQL row-change counters sampled as interval deltas.                                                                                             |
+| Cache hit                         | Current PostgreSQL block cache hit ratio.                                                                                                              |
+| Waiting locks                     | Locks not granted at sample time; use this beside p99 to identify contention.                                                                          |
+
+The charts show `1s LIVE` only while a run is active. Completed runs are explicitly labelled `RECORDED`. Lakebase-only database statistics should not be interpreted as DBSQL engine telemetry during a DBSQL run.
+
+## Demonstrate snapshot and restore under load
+
+1. Start **Mixed application traffic** for 60 seconds or longer.
+2. Open **Branch lab** while the TPS and latency charts are moving. Navigation does not stop the run.
+3. Select **Capture snapshot**. The operation stream and lineage poll every second while workload graphs continue updating.
+4. Select the completed `snapshot-*` node.
+5. Select **Restore isolated branch**. LakeLoad creates a `restore-*` branch and verifies its dedicated read-write compute. If the platform does not clone an endpoint with the branch, LakeLoad creates a 0.5–1 CU endpoint.
+6. Use the live graphs to show that benchmark traffic continued throughout both operations.
+7. Remove a disposable `restore-*` branch from its trash action when finished.
+
+LakeLoad never resets or overwrites `benchmark`. Restore means “create a new isolated branch from this snapshot.” The App only allows deletion of branches it recognizes by the `snapshot-*` or `restore-*` prefix; the UI exposes deletion only for disposable restore branches.
+
 Recommended demo sequence:
 
 1. Lakebase point lookup at 1, 10, 50, 100, and 150 users.
@@ -252,6 +281,8 @@ POST   /api/lakeload/runs
 GET    /api/lakeload/runs/{run_id}
 DELETE /api/lakeload/runs/{run_id}
 POST   /api/lakeload/verify-invariant
+POST   /api/lakeload/branches
+DELETE /api/lakeload/branches/{branch_id}
 ```
 
 Example run body:
@@ -267,6 +298,19 @@ Example run body:
 ```
 
 For an open-loop saturation test, set `executionModel` to `open` and add `targetRps`.
+
+Snapshot request:
+
+```json
+{
+  "kind": "snapshot",
+  "sourceBranch": "projects/lakeload/branches/benchmark",
+  "branchId": "snapshot-demo01",
+  "createCompute": false
+}
+```
+
+A restore request uses `kind: "restore"`, the full snapshot resource name as `sourceBranch`, a `restore-*` branch ID, and `createCompute: true`.
 
 ## Troubleshooting
 

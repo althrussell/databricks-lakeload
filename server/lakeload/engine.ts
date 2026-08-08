@@ -1,11 +1,7 @@
 import { randomInt } from 'node:crypto';
 import { LatencyHistogram } from './histogram';
 
-export type Scenario =
-  | 'lakebase-point-lookup'
-  | 'lakebase-transfer'
-  | 'lakebase-mixed'
-  | 'lakebase-operational-join';
+export type Scenario = 'lakebase-point-lookup' | 'lakebase-transfer' | 'lakebase-mixed' | 'lakebase-operational-join';
 
 export interface RunConfig {
   scenario: Scenario;
@@ -47,6 +43,21 @@ interface IntervalCounters {
   complex: number;
 }
 
+interface DatabaseStats {
+  commits: number;
+  rollbacks: number;
+  rowsInserted: number;
+  rowsUpdated: number;
+  rowsDeleted: number;
+  connectionsActive: number;
+  connectionsIdle: number;
+  connectionsTotal: number;
+  locksWaiting: number;
+  locksTotal: number;
+  cacheHitPct: number;
+  databaseBytes: number;
+}
+
 const delay = (milliseconds: number) => new Promise((resolve) => setTimeout(resolve, milliseconds));
 
 export class LoadEngine {
@@ -54,6 +65,8 @@ export class LoadEngine {
   private histogram = new LatencyHistogram();
   private overallHistogram = new LatencyHistogram();
   private interval: IntervalCounters = { success: 0, errors: 0, reads: 0, writes: 0, complex: 0 };
+  private previousDatabaseStats: DatabaseStats | null = null;
+  private flushing = false;
 
   constructor(
     private readonly target: TargetPool,
@@ -83,6 +96,7 @@ export class LoadEngine {
     this.histogram.reset();
     this.overallHistogram.reset();
     this.interval = { success: 0, errors: 0, reads: 0, writes: 0, complex: 0 };
+    this.previousDatabaseStats = await this.databaseStats();
 
     const endAt = Date.now() + config.durationSeconds * 1000;
     await this.control.query(`UPDATE lakeload_control.run SET status = 'running', started_at = NOW() WHERE id = $1`, [
@@ -281,32 +295,96 @@ export class LoadEngine {
   }
 
   private async flushMetric(runId: string) {
+    if (this.flushing) return;
     const active = this.activeRun;
     if (!active || active.id !== runId) return;
-    const histogram = this.histogram.snapshot();
-    const counters = this.interval;
-    this.histogram.reset();
-    this.interval = { success: 0, errors: 0, reads: 0, writes: 0, complex: 0 };
+    this.flushing = true;
+    try {
+      const [histogram, database] = [this.histogram.snapshot(), await this.databaseStats()];
+      const counters = this.interval;
+      const previous = this.previousDatabaseStats ?? database;
+      this.previousDatabaseStats = database;
+      this.histogram.reset();
+      this.interval = { success: 0, errors: 0, reads: 0, writes: 0, complex: 0 };
 
-    await this.control.query(
-      `INSERT INTO lakeload_control.run_metric
-       (run_id, elapsed_seconds, active_users, operations, errors, reads, writes, complex_queries,
-        p50_ms, p95_ms, p99_ms, histogram)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12::jsonb)`,
-      [
-        runId,
-        Math.max(0, Math.round((Date.now() - active.startedAt) / 1000)),
-        active.activeUsers,
-        counters.success,
-        counters.errors,
-        counters.reads,
-        counters.writes,
-        counters.complex,
-        histogram.p50Ms,
-        histogram.p95Ms,
-        histogram.p99Ms,
-        JSON.stringify({ boundsMs: histogram.boundsMs, counts: histogram.counts }),
-      ]
-    );
+      await this.control.query(
+        `INSERT INTO lakeload_control.run_metric
+         (run_id, elapsed_seconds, active_users, operations, errors, reads, writes, complex_queries,
+          p50_ms, p95_ms, p99_ms, histogram, database_tps, commits, rollbacks,
+          rows_inserted, rows_updated, rows_deleted, connections_active, connections_idle,
+          connections_total, locks_waiting, locks_total, cache_hit_pct, database_bytes)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12::jsonb,$13,$14,$15,$16,$17,$18,
+                 $19,$20,$21,$22,$23,$24,$25)`,
+        [
+          runId,
+          Math.max(0, Math.round((Date.now() - active.startedAt) / 1000)),
+          active.activeUsers,
+          counters.success,
+          counters.errors,
+          counters.reads,
+          counters.writes,
+          counters.complex,
+          histogram.p50Ms,
+          histogram.p95Ms,
+          histogram.p99Ms,
+          JSON.stringify({ boundsMs: histogram.boundsMs, counts: histogram.counts }),
+          Math.max(0, database.commits - previous.commits + database.rollbacks - previous.rollbacks),
+          Math.max(0, database.commits - previous.commits),
+          Math.max(0, database.rollbacks - previous.rollbacks),
+          Math.max(0, database.rowsInserted - previous.rowsInserted),
+          Math.max(0, database.rowsUpdated - previous.rowsUpdated),
+          Math.max(0, database.rowsDeleted - previous.rowsDeleted),
+          database.connectionsActive,
+          database.connectionsIdle,
+          database.connectionsTotal,
+          database.locksWaiting,
+          database.locksTotal,
+          database.cacheHitPct,
+          database.databaseBytes,
+        ]
+      );
+    } finally {
+      this.flushing = false;
+    }
+  }
+
+  private async databaseStats(): Promise<DatabaseStats> {
+    const result = (await this.target.query(`
+      WITH activity AS (
+        SELECT COUNT(*) FILTER (WHERE state = 'active' AND pid <> pg_backend_pid())::int AS active,
+               COUNT(*) FILTER (WHERE state = 'idle')::int AS idle,
+               COUNT(*)::int AS total
+        FROM pg_stat_activity WHERE datname = current_database()
+      ), lock_state AS (
+        SELECT COUNT(*) FILTER (WHERE NOT granted)::int AS waiting,
+               COUNT(*)::int AS total
+        FROM pg_locks
+      )
+      SELECT d.xact_commit::bigint AS commits, d.xact_rollback::bigint AS rollbacks,
+             d.tup_inserted::bigint AS rows_inserted, d.tup_updated::bigint AS rows_updated,
+             d.tup_deleted::bigint AS rows_deleted, activity.active AS connections_active,
+             activity.idle AS connections_idle, activity.total AS connections_total,
+             lock_state.waiting AS locks_waiting, lock_state.total AS locks_total,
+             CASE WHEN d.blks_hit + d.blks_read = 0 THEN 100
+                  ELSE ROUND(100.0 * d.blks_hit / (d.blks_hit + d.blks_read), 2) END::float AS cache_hit_pct,
+             pg_database_size(current_database())::bigint AS database_bytes
+      FROM pg_stat_database d CROSS JOIN activity CROSS JOIN lock_state
+      WHERE d.datname = current_database()
+    `)) as { rows?: Record<string, unknown>[] };
+    const row = result.rows?.[0] ?? {};
+    return {
+      commits: Number(row.commits ?? 0),
+      rollbacks: Number(row.rollbacks ?? 0),
+      rowsInserted: Number(row.rows_inserted ?? 0),
+      rowsUpdated: Number(row.rows_updated ?? 0),
+      rowsDeleted: Number(row.rows_deleted ?? 0),
+      connectionsActive: Number(row.connections_active ?? 0),
+      connectionsIdle: Number(row.connections_idle ?? 0),
+      connectionsTotal: Number(row.connections_total ?? 0),
+      locksWaiting: Number(row.locks_waiting ?? 0),
+      locksTotal: Number(row.locks_total ?? 0),
+      cacheHitPct: Number(row.cache_hit_pct ?? 0),
+      databaseBytes: Number(row.database_bytes ?? 0),
+    };
   }
 }
