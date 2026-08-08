@@ -1,0 +1,97 @@
+bundle:
+  name: lakeload
+
+variables:
+  postgres_branch:
+    description: Full Lakebase Postgres branch resource name. Obtain by running `databricks postgres list-branches {project-name}`, select the desired item from the output array and use its .name value. Requires the project resource name.
+  postgres_database:
+    description: Full Lakebase Postgres database resource name. Obtain by running `databricks postgres list-databases {branch-name}`, select the desired item from the output array and use its .name value. Requires the branch resource name.
+  postgres_project:
+    description: Full Lakebase Postgres project resource name. Obtain by running `databricks postgres list-projects`, select the desired item from the output array and use its .name value.
+  benchmark_postgres_branch:
+    description: Lakebase branch used as the isolated load-test target.
+  benchmark_postgres_database:
+    description: Lakebase database used as the isolated load-test target.
+
+resources:
+  jobs:
+    load_runner:
+      name: '[${bundle.target}] LakeLoad distributed runner'
+      description: 'Serverless PostgreSQL load generator for Lakebase demonstrations'
+      max_concurrent_runs: 1
+      queue:
+        enabled: true
+      performance_target: PERFORMANCE_OPTIMIZED
+      parameters:
+        - name: scenario
+          default: mixed-oltp
+        - name: concurrency
+          default: '50'
+        - name: duration
+          default: '60'
+        - name: seed
+          default: '424242'
+      tasks:
+        - task_key: generate_load
+          environment_key: default
+          spark_python_task:
+            python_file: ./runner/lakeload_job.py
+            parameters:
+              - --endpoint
+              - projects/lakeload/branches/benchmark/endpoints/primary
+              - --host
+              - ep-damp-salad-d6rrs6m0.database.ap-southeast-2.cloud.databricks.com
+              - --scenario
+              - '{{job.parameters.scenario}}'
+              - --concurrency
+              - '{{job.parameters.concurrency}}'
+              - --duration
+              - '{{job.parameters.duration}}'
+              - --seed
+              - '{{job.parameters.seed}}'
+      environments:
+        - environment_key: default
+          spec:
+            environment_version: '4'
+            dependencies:
+              - databricks-sdk>=0.81.0
+              - psycopg[binary]>=3.1
+
+  apps:
+    app:
+      name: 'lakeload'
+      description: 'Real-time Lakebase workload simulation and benchmarking'
+      source_code_path: ./
+      # Uncomment to enable on behalf of user API scopes. Available scopes: sql, dashboards.genie, files.files, serving.serving-endpoints
+      # user_api_scopes:
+      #   - sql
+
+      # The resources which this app has access to.
+      resources:
+        - name: postgres
+          postgres:
+            branch: ${var.postgres_branch}
+            database: ${var.postgres_database}
+            permission: CAN_CONNECT_AND_CREATE
+        - name: benchmark-postgres
+          postgres:
+            branch: ${var.benchmark_postgres_branch}
+            database: ${var.benchmark_postgres_database}
+            permission: CAN_CONNECT_AND_CREATE
+        - name: load-job
+          job:
+            id: ${resources.jobs.load_runner.id}
+            permission: CAN_MANAGE_RUN
+
+targets:
+  default:
+    default: true
+    workspace:
+      host: https://dbc-e155652a-2cba.cloud.databricks.com
+
+    variables:
+      postgres_branch: projects/lakeload/branches/production
+      postgres_database: projects/lakeload/branches/production/databases/databricks-postgres
+      postgres_project: projects/lakeload
+      benchmark_postgres_branch: projects/lakeload/branches/benchmark
+      benchmark_postgres_database: projects/lakeload/branches/benchmark/databases/databricks-postgres
