@@ -1,13 +1,19 @@
 import { randomInt } from 'node:crypto';
 import { LatencyHistogram } from './histogram';
 
-export type Scenario = 'mixed-oltp' | 'read-heavy' | 'write-heavy' | 'complex-queries';
+export type Scenario =
+  | 'lakebase-point-lookup'
+  | 'lakebase-transfer'
+  | 'lakebase-mixed'
+  | 'lakebase-operational-join';
 
 export interface RunConfig {
   scenario: Scenario;
   concurrency: number;
   durationSeconds: number;
   rampSeconds: number;
+  executionModel: 'closed' | 'open';
+  targetRps?: number;
 }
 
 interface ControlDatabase {
@@ -88,8 +94,12 @@ export class LoadEngine {
     }, 1000);
 
     try {
-      const workers = Array.from({ length: config.concurrency }, (_, index) => this.worker(index, endAt, config));
-      await Promise.all(workers);
+      if (config.executionModel === 'open') {
+        await this.openLoop(endAt, config);
+      } else {
+        const workers = Array.from({ length: config.concurrency }, (_, index) => this.worker(index, endAt, config));
+        await Promise.all(workers);
+      }
       await this.flushMetric(runId);
 
       const active = this.activeRun;
@@ -159,11 +169,55 @@ export class LoadEngine {
     }
   }
 
+  private async openLoop(endAt: number, config: RunConfig) {
+    const targetRps = Math.max(1, config.targetRps ?? config.concurrency);
+    const intervalMs = 1000 / targetRps;
+    const inFlight = new Set<Promise<void>>();
+    let nextArrival = performance.now();
+    while (Date.now() < endAt && this.activeRun && !this.activeRun.cancelled) {
+      const now = performance.now();
+      if (now < nextArrival) await delay(Math.min(10, nextArrival - now));
+      nextArrival += intervalMs;
+      if (inFlight.size >= config.concurrency) {
+        this.interval.errors += 1;
+        this.activeRun.totalErrors += 1;
+        continue;
+      }
+      const operation = this.chooseOperation(config.scenario);
+      const task = this.executeOnce(operation).finally(() => inFlight.delete(task));
+      inFlight.add(task);
+    }
+    await Promise.allSettled(inFlight);
+  }
+
+  private async executeOnce(operation: keyof Pick<IntervalCounters, 'reads' | 'writes' | 'complex'>) {
+    if (!this.activeRun) return;
+    const started = performance.now();
+    this.activeRun.activeUsers += 1;
+    try {
+      await this.execute(operation);
+      const elapsed = performance.now() - started;
+      this.histogram.observe(elapsed);
+      this.overallHistogram.observe(elapsed);
+      this.interval.success += 1;
+      this.interval[operation] += 1;
+      this.activeRun.totalSuccess += 1;
+    } catch {
+      const elapsed = performance.now() - started;
+      this.histogram.observe(elapsed);
+      this.overallHistogram.observe(elapsed);
+      this.interval.errors += 1;
+      this.activeRun.totalErrors += 1;
+    } finally {
+      if (this.activeRun) this.activeRun.activeUsers -= 1;
+    }
+  }
+
   private chooseOperation(scenario: Scenario): keyof Pick<IntervalCounters, 'reads' | 'writes' | 'complex'> {
     const roll = Math.random();
-    if (scenario === 'read-heavy') return roll < 0.85 ? 'reads' : roll < 0.95 ? 'writes' : 'complex';
-    if (scenario === 'write-heavy') return roll < 0.2 ? 'reads' : roll < 0.9 ? 'writes' : 'complex';
-    if (scenario === 'complex-queries') return roll < 0.25 ? 'reads' : roll < 0.4 ? 'writes' : 'complex';
+    if (scenario === 'lakebase-point-lookup') return 'reads';
+    if (scenario === 'lakebase-transfer') return 'writes';
+    if (scenario === 'lakebase-operational-join') return 'complex';
     return roll < 0.55 ? 'reads' : roll < 0.9 ? 'writes' : 'complex';
   }
 

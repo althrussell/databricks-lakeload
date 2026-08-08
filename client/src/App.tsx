@@ -1,38 +1,58 @@
-import { useCallback, useEffect, useMemo, useState, type ReactNode } from 'react';
-import { Badge, Button, Card, CardContent, Skeleton } from '@databricks/appkit-ui/react';
+import { useCallback, useEffect, useState, type ReactNode } from 'react';
+import { Badge, Button } from '@databricks/appkit-ui/react';
 import {
   Activity,
-  ArrowDownRight,
-  ArrowUpRight,
-  Boxes,
+  ArrowRight,
+  BarChart3,
+  BookOpen,
+  Check,
+  CircleAlert,
   Clock3,
   Database,
   Gauge,
-  History,
+  GitCompareArrows,
+  Layers3,
   Play,
-  RotateCw,
-  ServerCog,
+  RefreshCw,
+  Search,
+  Settings2,
   ShieldCheck,
   Square,
-  Waves,
+  TerminalSquare,
   Zap,
 } from 'lucide-react';
 
-type Scenario = 'mixed-oltp' | 'read-heavy' | 'write-heavy' | 'complex-queries';
+type Engine = 'lakebase' | 'dbsql' | 'ltap';
+type Tab = 'setup' | 'scenarios' | 'compare';
+
+interface Scenario {
+  id: string;
+  name: string;
+  engine: Engine;
+  category: 'OLTP' | 'OLAP' | 'LTAP' | 'Search' | 'Observability';
+  question: string;
+  method: string;
+  expected: string;
+  runnable: boolean;
+  prerequisite?: string;
+  defaultConcurrency: number;
+  defaultDurationSeconds: number;
+  tags: string[];
+}
 
 interface Run {
   id: string;
-  scenario: Scenario;
+  scenario: string;
+  engine: Engine;
   status: 'queued' | 'running' | 'completed' | 'cancelled' | 'failed';
   concurrency: number;
   duration_seconds: number;
   ramp_seconds: number;
-  requested_by: string;
+  execution_model: 'closed' | 'open';
+  target_rps: number | null;
   created_at: string;
-  started_at: string | null;
-  completed_at: string | null;
-  total_operations: string | number;
-  total_errors: string | number;
+  total_operations: number | string;
+  total_errors: number | string;
   p50_ms: number;
   p95_ms: number;
   p99_ms: number;
@@ -45,93 +65,70 @@ interface Metric {
   active_users: number;
   operations: number;
   errors: number;
-  reads: number;
-  writes: number;
-  complex_queries: number;
   p50_ms: number;
   p95_ms: number;
   p99_ms: number;
 }
 
+interface Readiness {
+  id: string;
+  label: string;
+  state: 'ready' | 'action' | 'blocked';
+  detail: string;
+}
+
 interface Overview {
+  scenarios: Scenario[];
   runs: Run[];
   activeRunId: string | null;
   activeMetrics: Metric[];
-  target: {
-    database: string;
-    postgres_version: string;
-    accounts: number;
-    products: number;
-    history_rows: number;
-  };
-  endpoint: { branch: string; endpoint: string; poolSize: number };
+  readiness: Readiness[];
+  target: { database: string; postgres_version: string; accounts: number; products: number; history_rows: number };
+  endpoint: { branch: string; endpoint: string; poolSize: number; autoscaling: string };
 }
 
-const EMPTY_OVERVIEW: Overview = {
+const EMPTY: Overview = {
+  scenarios: [],
   runs: [],
   activeRunId: null,
   activeMetrics: [],
+  readiness: [],
   target: { database: 'databricks_postgres', postgres_version: '17', accounts: 0, products: 0, history_rows: 0 },
-  endpoint: { branch: 'benchmark', endpoint: 'primary', poolSize: 80 },
+  endpoint: { branch: 'benchmark', endpoint: 'primary', poolSize: 80, autoscaling: '1–4 CU' },
 };
 
-const scenarios: Record<Scenario, { name: string; description: string; mix: string }> = {
-  'mixed-oltp': { name: 'Mixed OLTP', description: 'Balanced reads, writes and bounded joins', mix: '55R / 35W / 10C' },
-  'read-heavy': { name: 'Read heavy', description: 'Indexed point lookups with light writes', mix: '85R / 10W / 5C' },
-  'write-heavy': {
-    name: 'Write heavy',
-    description: 'Transactional transfers and history inserts',
-    mix: '20R / 70W / 10C',
-  },
-  'complex-queries': {
-    name: 'Complex queries',
-    description: 'Bounded joins and operational aggregates',
-    mix: '25R / 15W / 60C',
-  },
-};
-
-function number(value: string | number | null | undefined) {
-  return Number(value ?? 0);
-}
-
-function compact(value: number) {
-  return new Intl.NumberFormat('en', { notation: 'compact', maximumFractionDigits: 1 }).format(value);
-}
-
-function statusClass(status: Run['status']) {
-  if (status === 'running') return 'status-running';
-  if (status === 'completed') return 'status-completed';
-  if (status === 'failed') return 'status-failed';
-  return 'status-neutral';
-}
+const n = (value: number | string | null | undefined) => Number(value ?? 0);
+const compact = (value: number) => new Intl.NumberFormat('en', { notation: 'compact', maximumFractionDigits: 1 }).format(value);
 
 export default function App() {
-  const [overview, setOverview] = useState<Overview>(EMPTY_OVERVIEW);
-  const [metrics, setMetrics] = useState<Metric[]>([]);
+  const [tab, setTab] = useState<Tab>('setup');
+  const [overview, setOverview] = useState<Overview>(EMPTY);
+  const [selectedScenarioId, setSelectedScenarioId] = useState('lakebase-point-lookup');
   const [selectedRunId, setSelectedRunId] = useState<string | null>(null);
-  const [scenario, setScenario] = useState<Scenario>('mixed-oltp');
+  const [metrics, setMetrics] = useState<Metric[]>([]);
   const [concurrency, setConcurrency] = useState(50);
-  const [durationSeconds, setDurationSeconds] = useState(60);
-  const [rampSeconds, setRampSeconds] = useState(10);
+  const [durationSeconds, setDuration] = useState(30);
+  const [rampSeconds, setRamp] = useState(5);
+  const [executionModel, setExecutionModel] = useState<'closed' | 'open'>('closed');
+  const [targetRps, setTargetRps] = useState(100);
+  const [busy, setBusy] = useState(false);
   const [loading, setLoading] = useState(true);
-  const [submitting, setSubmitting] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [message, setMessage] = useState<{ kind: 'error' | 'success'; text: string } | null>(null);
 
   const refresh = useCallback(async () => {
     try {
       const response = await fetch('/api/lakeload/overview');
-      if (!response.ok) throw new Error(`Overview request failed (${response.status})`);
-      const next = (await response.json()) as Overview;
-      setOverview(next);
-      if (next.activeRunId) {
-        setSelectedRunId(next.activeRunId);
-        setMetrics(next.activeMetrics.map(normalizeMetric));
-      } else if (!selectedRunId && next.runs[0]) {
-        setSelectedRunId(next.runs[0].id);
+      const body = (await response.json()) as Overview & { error?: string };
+      if (!response.ok) throw new Error(body.error ?? `Overview failed (${response.status})`);
+      setOverview(body);
+      if (body.activeRunId) {
+        setSelectedRunId(body.activeRunId);
+        setMetrics(body.activeMetrics.map(normalizeMetric));
+      } else if (!selectedRunId && body.runs[0]) {
+        setSelectedRunId(body.runs[0].id);
       }
-      setError(null);
-    } catch (cause) {
-      setError(cause instanceof Error ? cause.message : 'Unable to load LakeLoad');
+    } catch (error) {
+      setMessage({ kind: 'error', text: error instanceof Error ? error.message : 'LakeLoad could not load.' });
     } finally {
       setLoading(false);
     }
@@ -139,539 +136,263 @@ export default function App() {
 
   useEffect(() => {
     void refresh();
-    const timer = setInterval(() => void refresh(), 1000);
-    return () => clearInterval(timer);
+    const timer = window.setInterval(() => void refresh(), 1000);
+    return () => window.clearInterval(timer);
   }, [refresh]);
 
   useEffect(() => {
     if (!selectedRunId || selectedRunId === overview.activeRunId) return;
     void fetch(`/api/lakeload/runs/${selectedRunId}`)
-      .then((response) => {
-        if (!response.ok) throw new Error('Unable to load run details');
-        return response.json() as Promise<{ run: Run; metrics: Metric[] }>;
+      .then(async (response) => {
+        const body = (await response.json()) as { metrics?: Metric[]; error?: string };
+        if (!response.ok) throw new Error(body.error ?? 'Run details could not load.');
+        setMetrics((body.metrics ?? []).map(normalizeMetric));
       })
-      .then((result) => setMetrics(result.metrics.map(normalizeMetric)))
-      .catch((cause) => setError(cause instanceof Error ? cause.message : 'Unable to load run'));
+      .catch((error) => setMessage({ kind: 'error', text: error instanceof Error ? error.message : String(error) }));
   }, [overview.activeRunId, selectedRunId]);
 
-  const selectedRun = useMemo(
-    () => overview.runs.find((run) => run.id === selectedRunId) ?? overview.runs[0] ?? null,
-    [overview.runs, selectedRunId]
-  );
+  const selectedScenario = overview.scenarios.find((item) => item.id === selectedScenarioId) ?? overview.scenarios[0];
+  const selectedRun = overview.runs.find((item) => item.id === selectedRunId) ?? overview.runs[0];
   const latest = metrics.at(-1);
-  const totalOps = metrics.reduce((sum, metric) => sum + number(metric.operations), 0);
-  const totalErrors = metrics.reduce((sum, metric) => sum + number(metric.errors), 0);
-  const errorRate = totalOps + totalErrors === 0 ? 0 : (totalErrors / (totalOps + totalErrors)) * 100;
-  const progress =
-    selectedRun?.status === 'running' && latest
-      ? Math.min(100, (number(latest.elapsed_seconds) / selectedRun.duration_seconds) * 100)
-      : selectedRun?.status === 'completed'
-        ? 100
-        : 0;
+  const lakebaseCompare = overview.runs.find((run) => run.engine === 'lakebase' && run.status === 'completed');
+  const dbsqlCompare = overview.runs.find((run) => run.engine === 'dbsql' && run.status === 'completed');
 
-  async function startRun() {
-    setSubmitting(true);
-    setError(null);
+  function selectScenario(scenario: Scenario) {
+    setSelectedScenarioId(scenario.id);
+    setConcurrency(scenario.defaultConcurrency);
+    setDuration(scenario.defaultDurationSeconds);
+  }
+
+  async function prepare() {
+    setBusy(true);
+    setMessage(null);
+    try {
+      const response = await fetch('/api/lakeload/setup', { method: 'POST' });
+      const body = (await response.json()) as { message?: string; error?: string };
+      if (!response.ok) throw new Error(body.error ?? 'Setup stopped.');
+      setMessage({ kind: 'success', text: body.message ?? 'Benchmark datasets are ready.' });
+      await refresh();
+    } catch (error) {
+      setMessage({ kind: 'error', text: error instanceof Error ? error.message : String(error) });
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function launch() {
+    if (!selectedScenario) return;
+    setBusy(true);
+    setMessage(null);
     try {
       const response = await fetch('/api/lakeload/runs', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ scenario, concurrency, durationSeconds, rampSeconds }),
+        body: JSON.stringify({
+          scenario: selectedScenario.id,
+          concurrency,
+          durationSeconds,
+          rampSeconds,
+          executionModel,
+          targetRps: executionModel === 'open' ? targetRps : undefined,
+        }),
       });
       const body = (await response.json()) as { runId?: string; error?: string };
-      if (!response.ok || !body.runId) throw new Error(body.error ?? 'Unable to start run');
+      if (!response.ok || !body.runId) throw new Error(body.error ?? 'Run could not start.');
       setSelectedRunId(body.runId);
       setMetrics([]);
       await refresh();
-    } catch (cause) {
-      setError(cause instanceof Error ? cause.message : 'Unable to start run');
+    } catch (error) {
+      setMessage({ kind: 'error', text: error instanceof Error ? error.message : String(error) });
     } finally {
-      setSubmitting(false);
+      setBusy(false);
     }
   }
 
-  async function stopRun() {
+  async function stop() {
     if (!overview.activeRunId) return;
     await fetch(`/api/lakeload/runs/${overview.activeRunId}`, { method: 'DELETE' });
     await refresh();
   }
 
   return (
-    <div className="app-shell">
-      <aside className="side-rail">
-        <div className="brand-mark">
-          <Waves size={22} strokeWidth={2.4} />
+    <div className="shell">
+      <header className="topbar">
+        <div className="brand-lockup">
+          <span className="brand-symbol" aria-hidden="true"><Layers3 /></span>
+          <div><p>Databricks Lakebase</p><h1>LakeLoad</h1></div>
         </div>
-        <nav aria-label="Primary navigation">
-          <button className="rail-button active" aria-label="Live run">
-            <Activity size={19} />
-          </button>
-          <button className="rail-button" aria-label="Run history">
-            <History size={19} />
-          </button>
-          <button className="rail-button" aria-label="Target settings">
-            <ServerCog size={19} />
-          </button>
-        </nav>
-        <div className="rail-spacer" />
-        <div className="connection-dot" title="Lakebase connected" />
-      </aside>
+        <div className="environment" aria-label="Benchmark target">
+          <span className="status-dot" />
+          <div><strong>{overview.endpoint.branch}/{overview.endpoint.endpoint}</strong><small>PostgreSQL {overview.target.postgres_version} · {overview.endpoint.autoscaling}</small></div>
+        </div>
+      </header>
 
-      <main className="workspace">
-        <header className="topbar">
-          <div>
-            <div className="eyebrow">DATABRICKS LAKEBASE</div>
-            <h1>LakeLoad</h1>
-          </div>
-          <div className="target-pill">
-            <span className="target-icon">
-              <Database size={16} />
-            </span>
-            <span>
-              <b>{overview.endpoint.branch}</b>
-              <small>
-                {overview.endpoint.endpoint} · PostgreSQL {overview.target.postgres_version}
-              </small>
-            </span>
-            <ShieldCheck size={17} className="target-ok" />
-          </div>
-        </header>
+      <nav className="tabs" aria-label="LakeLoad sections">
+        <TabButton active={tab === 'setup'} onClick={() => setTab('setup')} icon={<Settings2 />}>Setup</TabButton>
+        <TabButton active={tab === 'scenarios'} onClick={() => setTab('scenarios')} icon={<Activity />}>Scenarios</TabButton>
+        <TabButton active={tab === 'compare'} onClick={() => setTab('compare')} icon={<GitCompareArrows />}>Compare</TabButton>
+        <a className="docs-link" href="https://github.com/althrussell/databricks-lakeload/blob/main/docs/customer-guide.md" target="_blank" rel="noreferrer"><BookOpen /> Customer guide</a>
+      </nav>
 
-        {error && (
-          <div className="error-banner">
-            {error}
-            <Button variant="ghost" size="sm" onClick={() => void refresh()}>
-              <RotateCw size={14} /> Retry
-            </Button>
-          </div>
+      <main>
+        {message && <div className={`notice ${message.kind}`} role="status"><CircleAlert /> <span>{message.text}</span><button onClick={() => setMessage(null)} aria-label="Dismiss message">×</button></div>}
+        {loading ? <LoadingState /> : tab === 'setup' ? (
+          <SetupView overview={overview} busy={busy} onPrepare={() => void prepare()} />
+        ) : tab === 'scenarios' ? (
+          <ScenarioView
+            overview={overview}
+            selectedScenario={selectedScenario}
+            onSelect={selectScenario}
+            concurrency={concurrency}
+            setConcurrency={setConcurrency}
+            duration={durationSeconds}
+            setDuration={setDuration}
+            ramp={rampSeconds}
+            setRamp={setRamp}
+            executionModel={executionModel}
+            setExecutionModel={setExecutionModel}
+            targetRps={targetRps}
+            setTargetRps={setTargetRps}
+            busy={busy}
+            onLaunch={() => void launch()}
+            onStop={() => void stop()}
+            selectedRun={selectedRun}
+            setSelectedRunId={setSelectedRunId}
+            metrics={metrics}
+            latest={latest}
+          />
+        ) : (
+          <CompareView lakebase={lakebaseCompare} dbsql={dbsqlCompare} scenarios={overview.scenarios} />
         )}
-
-        <section className="hero-grid">
-          <div className="run-panel">
-            <div className="section-heading">
-              <div>
-                <span className="section-kicker">WORKLOAD</span>
-                <h2>Shape the pressure</h2>
-              </div>
-              <Badge variant="outline" className="repeatable-badge">
-                <Boxes size={13} /> deterministic dataset
-              </Badge>
-            </div>
-
-            <div className="scenario-grid">
-              {(Object.entries(scenarios) as Array<[Scenario, (typeof scenarios)[Scenario]]>).map(([key, value]) => (
-                <button
-                  key={key}
-                  type="button"
-                  className={`scenario-card ${scenario === key ? 'selected' : ''}`}
-                  onClick={() => setScenario(key)}
-                  disabled={Boolean(overview.activeRunId)}
-                >
-                  <span className="scenario-radio" />
-                  <strong>{value.name}</strong>
-                  <small>{value.description}</small>
-                  <code>{value.mix}</code>
-                </button>
-              ))}
-            </div>
-
-            <div className="controls-grid">
-              <RangeControl
-                label="Concurrent users"
-                value={concurrency}
-                min={1}
-                max={150}
-                step={1}
-                suffix=" VUs"
-                onChange={setConcurrency}
-              />
-              <RangeControl
-                label="Duration"
-                value={durationSeconds}
-                min={10}
-                max={300}
-                step={10}
-                suffix=" sec"
-                onChange={setDurationSeconds}
-              />
-              <RangeControl
-                label="Ramp"
-                value={rampSeconds}
-                min={0}
-                max={60}
-                step={5}
-                suffix=" sec"
-                onChange={setRampSeconds}
-              />
-            </div>
-
-            <div className="run-actions">
-              <div className="safety-note">
-                <ShieldCheck size={16} />
-                <span>
-                  Isolated benchmark branch
-                  <br />
-                  <small>Pool capped at {overview.endpoint.poolSize} connections</small>
-                </span>
-              </div>
-              {overview.activeRunId ? (
-                <Button variant="destructive" size="lg" onClick={() => void stopRun()}>
-                  <Square size={15} fill="currentColor" /> Stop run
-                </Button>
-              ) : (
-                <Button
-                  size="lg"
-                  className="launch-button"
-                  disabled={submitting || loading}
-                  onClick={() => void startRun()}
-                >
-                  {submitting ? <RotateCw className="spin" size={17} /> : <Play size={17} fill="currentColor" />} Launch
-                  run
-                </Button>
-              )}
-            </div>
-          </div>
-
-          <div className="dataset-panel">
-            <div className="section-heading">
-              <div>
-                <span className="section-kicker">TARGET</span>
-                <h2>Ready for load</h2>
-              </div>
-              <span className="live-dot">LIVE</span>
-            </div>
-            <div className="database-orbit">
-              <Database size={38} />
-              <span className="orbit orbit-one" />
-              <span className="orbit orbit-two" />
-            </div>
-            <div className="dataset-stats">
-              <DataStat label="Accounts" value={compact(number(overview.target.accounts))} />
-              <DataStat label="Products" value={compact(number(overview.target.products))} />
-              <DataStat label="Transactions" value={compact(number(overview.target.history_rows))} />
-            </div>
-            <div className="endpoint-detail">
-              <span>Compute</span>
-              <b>1–4 CU autoscaling</b>
-            </div>
-            <div className="endpoint-detail">
-              <span>Connection mode</span>
-              <b>OAuth pool</b>
-            </div>
-          </div>
-        </section>
-
-        <section className="live-section">
-          <div className="live-header">
-            <div className="run-title">
-              <span className={`pulse-indicator ${selectedRun?.status === 'running' ? 'on' : ''}`} />
-              <div>
-                <span className="section-kicker">LIVE TELEMETRY</span>
-                <h2>{selectedRun ? scenarios[selectedRun.scenario].name : 'Waiting for first run'}</h2>
-              </div>
-            </div>
-            {selectedRun && (
-              <div className="run-meta">
-                <Badge variant="outline" className={statusClass(selectedRun.status)}>
-                  {selectedRun.status}
-                </Badge>
-                <span>{selectedRun.concurrency} VUs</span>
-                <span>{selectedRun.duration_seconds}s</span>
-              </div>
-            )}
-          </div>
-
-          <div className="progress-track">
-            <span style={{ width: `${progress}%` }} />
-          </div>
-
-          <div className="metrics-grid">
-            <MetricCard
-              icon={<Zap size={16} />}
-              label="Throughput"
-              value={compact(number(latest?.operations))}
-              unit="ops/s"
-              trend="live"
-            />
-            <MetricCard
-              icon={<Clock3 size={16} />}
-              label="P50 latency"
-              value={number(latest?.p50_ms).toFixed(0)}
-              unit="ms"
-              trend="median"
-            />
-            <MetricCard
-              icon={<Gauge size={16} />}
-              label="P95 latency"
-              value={number(latest?.p95_ms).toFixed(0)}
-              unit="ms"
-              trend="tail"
-            />
-            <MetricCard
-              icon={<Activity size={16} />}
-              label="P99 latency"
-              value={number(latest?.p99_ms).toFixed(0)}
-              unit="ms"
-              trend="peak"
-            />
-            <MetricCard
-              icon={<ShieldCheck size={16} />}
-              label="Error rate"
-              value={errorRate.toFixed(2)}
-              unit="%"
-              trend={errorRate < 1 ? 'healthy' : 'watch'}
-            />
-          </div>
-
-          <div className="charts-grid">
-            <TelemetryChart
-              title="Throughput"
-              subtitle="Operations per second"
-              metrics={metrics}
-              series={[{ key: 'operations', color: '#40d1f5', label: 'ops/s' }]}
-            />
-            <TelemetryChart
-              title="Latency envelope"
-              subtitle="Tail behavior in milliseconds"
-              metrics={metrics}
-              series={[
-                { key: 'p50_ms', color: '#40d1f5', label: 'p50' },
-                { key: 'p95_ms', color: '#8b7cf6', label: 'p95' },
-                { key: 'p99_ms', color: '#ff5f57', label: 'p99' },
-              ]}
-            />
-          </div>
-        </section>
-
-        <section className="history-section">
-          <div className="section-heading">
-            <div>
-              <span className="section-kicker">RUN LEDGER</span>
-              <h2>Recent experiments</h2>
-            </div>
-            <span className="muted-caption">Repeatable by seed and configuration</span>
-          </div>
-          <div className="history-table" role="table" aria-label="Recent load tests">
-            <div className="history-row history-head" role="row">
-              <span>Scenario</span>
-              <span>Users</span>
-              <span>Operations</span>
-              <span>P95</span>
-              <span>Errors</span>
-              <span>Status</span>
-            </div>
-            {overview.runs.slice(0, 8).map((run) => (
-              <button
-                key={run.id}
-                className={`history-row ${selectedRunId === run.id ? 'active' : ''}`}
-                onClick={() => setSelectedRunId(run.id)}
-                role="row"
-              >
-                <span>
-                  <b>{scenarios[run.scenario].name}</b>
-                  <small>{new Date(run.created_at).toLocaleTimeString()}</small>
-                </span>
-                <span>{run.concurrency}</span>
-                <span>{compact(number(run.total_operations))}</span>
-                <span>{number(run.p95_ms).toFixed(0)} ms</span>
-                <span>{compact(number(run.total_errors))}</span>
-                <span>
-                  <Badge variant="outline" className={statusClass(run.status)}>
-                    {run.status}
-                  </Badge>
-                </span>
-              </button>
-            ))}
-            {!loading && overview.runs.length === 0 && (
-              <div className="empty-history">
-                <Waves size={24} />
-                <span>Your first run will appear here.</span>
-              </div>
-            )}
-          </div>
-        </section>
       </main>
     </div>
   );
 }
 
-function normalizeMetric(metric: Metric): Metric {
-  return {
-    recorded_at: metric.recorded_at,
-    elapsed_seconds: number(metric.elapsed_seconds),
-    active_users: number(metric.active_users),
-    operations: number(metric.operations),
-    errors: number(metric.errors),
-    reads: number(metric.reads),
-    writes: number(metric.writes),
-    complex_queries: number(metric.complex_queries),
-    p50_ms: number(metric.p50_ms),
-    p95_ms: number(metric.p95_ms),
-    p99_ms: number(metric.p99_ms),
-  };
-}
-
-function RangeControl({
-  label,
-  value,
-  min,
-  max,
-  step,
-  suffix,
-  onChange,
-}: {
-  label: string;
-  value: number;
-  min: number;
-  max: number;
-  step: number;
-  suffix: string;
-  onChange: (value: number) => void;
-}) {
-  return (
-    <label className="range-control">
-      <span>
-        <b>{label}</b>
-        <output>
-          {value}
-          {suffix}
-        </output>
-      </span>
-      <input
-        type="range"
-        value={value}
-        min={min}
-        max={max}
-        step={step}
-        onChange={(event) => onChange(Number(event.target.value))}
-      />
-      <small>
-        {min}
-        {suffix} <i /> {max}
-        {suffix}
-      </small>
-    </label>
-  );
-}
-
-function DataStat({ label, value }: { label: string; value: string }) {
-  return (
-    <div>
-      <strong>{value}</strong>
-      <span>{label}</span>
-    </div>
-  );
-}
-
-function MetricCard({
-  icon,
-  label,
-  value,
-  unit,
-  trend,
-}: {
-  icon: ReactNode;
-  label: string;
-  value: string;
-  unit: string;
-  trend: string;
-}) {
-  return (
-    <Card className="metric-card">
-      <CardContent>
-        <span className="metric-icon">{icon}</span>
-        <span className="metric-label">{label}</span>
-        <div>
-          <strong>{value}</strong>
-          <small>{unit}</small>
-        </div>
-        <span className="metric-trend">
-          {trend === 'healthy' ? <ArrowDownRight size={13} /> : <ArrowUpRight size={13} />} {trend}
-        </span>
-      </CardContent>
-    </Card>
-  );
-}
-
-type MetricKey = 'operations' | 'p50_ms' | 'p95_ms' | 'p99_ms';
-
-function TelemetryChart({
-  title,
-  subtitle,
-  metrics,
-  series,
-}: {
-  title: string;
-  subtitle: string;
-  metrics: Metric[];
-  series: Array<{ key: MetricKey; color: string; label: string }>;
-}) {
-  const width = 700;
-  const height = 220;
-  const padding = 24;
-  const allValues = metrics.flatMap((metric) => series.map((item) => number(metric[item.key])));
-  const max = Math.max(1, ...allValues);
-  const points = (key: MetricKey) =>
-    metrics
-      .map((metric, index) => {
-        const x = padding + (index / Math.max(1, metrics.length - 1)) * (width - padding * 2);
-        const y = height - padding - (number(metric[key]) / max) * (height - padding * 2);
-        return `${x},${y}`;
-      })
-      .join(' ');
-
-  return (
-    <div className="chart-card">
-      <div className="chart-heading">
-        <div>
-          <h3>{title}</h3>
-          <span>{subtitle}</span>
-        </div>
-        <div className="chart-legend">
-          {series.map((item) => (
-            <span key={item.key}>
-              <i style={{ background: item.color }} />
-              {item.label}
-            </span>
-          ))}
-        </div>
+function SetupView({ overview, busy, onPrepare }: { overview: Overview; busy: boolean; onPrepare: () => void }) {
+  const ready = overview.readiness.filter((item) => item.state === 'ready').length;
+  return <>
+    <section className="page-intro">
+      <div><p className="kicker">Environment readiness</p><h2>Prepare the benchmark</h2><p>LakeLoad owns its PostgreSQL schemas. The installer binds Lakebase and DBSQL resources; preview features remain explicit setup steps.</p></div>
+      <Button size="lg" onClick={onPrepare} disabled={busy}>{busy ? <RefreshCw className="spin" /> : <Database />} {busy ? 'Preparing data' : 'Prepare all data'}</Button>
+    </section>
+    <section className="summary-strip">
+      <Summary label="Checks ready" value={`${ready}/${overview.readiness.length}`} detail="Live preflight" />
+      <Summary label="Lakebase rows" value={compact(n(overview.target.accounts) + n(overview.target.products) + n(overview.target.history_rows))} detail="Operational dataset" />
+      <Summary label="DBSQL target" value="5M+" detail="Delta fact rows" />
+      <Summary label="Seed" value="424242" detail="Repeatable generation" />
+    </section>
+    <section className="panel">
+      <div className="panel-heading"><div><p className="kicker">Preflight</p><h3>Feature readiness</h3></div><Badge variant="outline">live checks</Badge></div>
+      <div className="readiness-list">
+        {overview.readiness.map((item) => <div className="readiness-row" key={item.id}>
+          <StateIcon state={item.state} />
+          <div><strong>{item.label}</strong><p>{item.detail}</p></div>
+          <span className={`state-label ${item.state}`}>{item.state === 'action' ? 'setup required' : item.state}</span>
+        </div>)}
       </div>
-      {metrics.length === 0 ? (
-        <div className="chart-empty">
-          <Skeleton className="h-full w-full" />
-          <span>Launch a run to stream telemetry</span>
-        </div>
-      ) : (
-        <svg viewBox={`0 0 ${width} ${height}`} role="img" aria-label={`${title} time series`}>
-          <defs>
-            <linearGradient id={`fill-${series[0].key}`} x1="0" y1="0" x2="0" y2="1">
-              <stop offset="0%" stopColor={series[0].color} stopOpacity="0.24" />
-              <stop offset="100%" stopColor={series[0].color} stopOpacity="0" />
-            </linearGradient>
-          </defs>
-          {[0.25, 0.5, 0.75, 1].map((ratio) => (
-            <line
-              key={ratio}
-              x1={padding}
-              x2={width - padding}
-              y1={padding + (height - padding * 2) * ratio}
-              y2={padding + (height - padding * 2) * ratio}
-              className="grid-line"
-            />
-          ))}
-          {series.map((item) => (
-            <polyline
-              key={item.key}
-              points={points(item.key)}
-              fill="none"
-              stroke={item.color}
-              strokeWidth="3"
-              strokeLinejoin="round"
-              strokeLinecap="round"
-            />
-          ))}
-        </svg>
-      )}
-    </div>
-  );
+    </section>
+  </>;
 }
+
+type ScenarioViewProps = {
+  overview: Overview; selectedScenario?: Scenario; onSelect: (scenario: Scenario) => void;
+  concurrency: number; setConcurrency: (value: number) => void; duration: number; setDuration: (value: number) => void;
+  ramp: number; setRamp: (value: number) => void; executionModel: 'closed' | 'open'; setExecutionModel: (value: 'closed' | 'open') => void;
+  targetRps: number; setTargetRps: (value: number) => void; busy: boolean; onLaunch: () => void; onStop: () => void;
+  selectedRun?: Run; setSelectedRunId: (id: string) => void; metrics: Metric[]; latest?: Metric;
+};
+
+function ScenarioView(props: ScenarioViewProps) {
+  const { overview, selectedScenario, onSelect, selectedRun, latest } = props;
+  const errorRate = latest ? n(latest.errors) / Math.max(1, n(latest.operations) + n(latest.errors)) * 100 : 0;
+  return <>
+    <section className="page-intro compact"><div><p className="kicker">Scenario catalog</p><h2>Test the right engine for the job</h2><p>OLTP and OLAP results use the same seed and record the conditions needed to explain the result.</p></div></section>
+    <div className="workbench">
+      <section className="scenario-catalog panel" aria-label="Benchmark scenarios">
+        {overview.scenarios.map((scenario) => <button key={scenario.id} className={`scenario-item ${selectedScenario?.id === scenario.id ? 'selected' : ''}`} onClick={() => onSelect(scenario)}>
+          <span className={`engine-mark ${scenario.engine}`}>{scenario.engine}</span>
+          <span><strong>{scenario.name}</strong><small>{scenario.question}</small></span>
+          {!scenario.runnable && <Badge variant="outline">guided</Badge>}
+          <ArrowRight />
+        </button>)}
+      </section>
+      <aside className="configuration panel">
+        {selectedScenario && <>
+          <div className="panel-heading"><div><p className="kicker">{selectedScenario.category}</p><h3>{selectedScenario.name}</h3></div><span className={`engine-pill ${selectedScenario.engine}`}>{selectedScenario.engine}</span></div>
+          <p className="method">{selectedScenario.method}</p>
+          <div className="expectation"><ShieldCheck /><span><strong>What this shows</strong>{selectedScenario.expected}</span></div>
+          <fieldset><legend>Arrival model</legend><div className="segmented"><button className={props.executionModel === 'closed' ? 'active' : ''} onClick={() => props.setExecutionModel('closed')}>Closed loop</button><button className={props.executionModel === 'open' ? 'active' : ''} onClick={() => props.setExecutionModel('open')}>Target rate</button></div></fieldset>
+          <Range label="Concurrency" value={props.concurrency} min={1} max={150} onChange={props.setConcurrency} />
+          {props.executionModel === 'open' && <Range label="Target ops/s" value={props.targetRps} min={1} max={1000} step={10} onChange={props.setTargetRps} />}
+          <Range label="Duration (seconds)" value={props.duration} min={10} max={300} step={10} onChange={props.setDuration} />
+          <Range label="Ramp (seconds)" value={props.ramp} min={0} max={60} step={5} onChange={props.setRamp} />
+          {overview.activeRunId ? <Button variant="destructive" size="lg" onClick={props.onStop}><Square /> Stop run</Button> : <Button size="lg" onClick={props.onLaunch} disabled={props.busy || !selectedScenario.runnable}><Play /> {selectedScenario.runnable ? 'Run scenario' : `Set up ${selectedScenario.prerequisite}`}</Button>}
+        </>}
+      </aside>
+    </div>
+    <section className="panel live-panel">
+      <div className="panel-heading"><div><p className="kicker">Live result</p><h3>{selectedRun ? scenarioName(overview.scenarios, selectedRun.scenario) : 'No run selected'}</h3></div>{selectedRun && <span className={`state-label ${selectedRun.status === 'completed' ? 'ready' : selectedRun.status === 'failed' ? 'blocked' : 'action'}`}>{selectedRun.status}</span>}</div>
+      <div className="metric-strip">
+        <Metric icon={<Zap />} label="Throughput" value={compact(n(latest?.operations))} unit="ops/s" />
+        <Metric icon={<Clock3 />} label="P50" value={n(latest?.p50_ms).toFixed(0)} unit="ms" />
+        <Metric icon={<Gauge />} label="P95" value={n(latest?.p95_ms).toFixed(0)} unit="ms" />
+        <Metric icon={<Activity />} label="P99" value={n(latest?.p99_ms).toFixed(0)} unit="ms" />
+        <Metric icon={<CircleAlert />} label="Errors" value={errorRate.toFixed(2)} unit="%" />
+      </div>
+      <Telemetry metrics={props.metrics} />
+      <div className="run-ledger" role="table" aria-label="Recent benchmark runs">
+        <div className="ledger-row head" role="row"><span>Scenario</span><span>Engine</span><span>Users</span><span>Operations</span><span>P95</span><span>Status</span></div>
+        {overview.runs.slice(0, 10).map((run) => <button className={`ledger-row ${selectedRun?.id === run.id ? 'selected' : ''}`} role="row" key={run.id} onClick={() => props.setSelectedRunId(run.id)}><span>{scenarioName(overview.scenarios, run.scenario)}</span><span>{run.engine}</span><span>{run.concurrency}</span><span>{compact(n(run.total_operations))}</span><span>{n(run.p95_ms).toFixed(0)} ms</span><span>{run.status}</span></button>)}
+      </div>
+    </section>
+  </>;
+}
+
+function CompareView({ lakebase, dbsql, scenarios }: { lakebase?: Run; dbsql?: Run; scenarios: Scenario[] }) {
+  return <>
+    <section className="page-intro compact"><div><p className="kicker">Engine comparison</p><h2>Place each workload where it fits</h2><p>Lakebase serves concurrent transactions. DBSQL scans and reshapes analytical data. LTAP connects both paths.</p></div></section>
+    <section className="comparison-grid">
+      <ComparisonCard title="Lakebase / OLTP" run={lakebase} scenarios={scenarios} icon={<Database />} guidance="Use for point reads, writes, constraints, transactions, and application concurrency." />
+      <ComparisonCard title="DBSQL / OLAP" run={dbsql} scenarios={scenarios} icon={<BarChart3 />} guidance="Use for large scans, wide joins, windows, BI, and multi-dimensional aggregation." />
+    </section>
+    <section className="panel ltap-panel">
+      <div className="panel-heading"><div><p className="kicker">Closed-loop LTAP</p><h3>Operational data out, enriched data back</h3></div><Badge variant="outline">freshness measured at every boundary</Badge></div>
+      <div className="ltap-flow">
+        <FlowStep icon={<TerminalSquare />} label="1. Commit" detail="Lakebase order transaction" />
+        <ArrowRight />
+        <FlowStep icon={<Activity />} label="2. Capture" detail="Lakebase CDF to Delta" />
+        <ArrowRight />
+        <FlowStep icon={<BarChart3 />} label="3. Enrich" detail="DBSQL profile and score" />
+        <ArrowRight />
+        <FlowStep icon={<Layers3 />} label="4. Sync" detail="Delta table to Lakebase" />
+        <ArrowRight />
+        <FlowStep icon={<Search />} label="5. Serve" detail="Indexed checkout lookup" />
+      </div>
+      <p className="flow-note">The CDF and sync scenarios record commit time, Delta arrival, enrichment completion, Lakebase visibility, and end-to-end lag. Setup stays disabled until both previews are ready.</p>
+    </section>
+  </>;
+}
+
+function ComparisonCard({ title, run, scenarios, icon, guidance }: { title: string; run?: Run; scenarios: Scenario[]; icon: ReactNode; guidance: string }) {
+  return <article className="panel comparison-card"><div className="comparison-title"><span>{icon}</span><div><p className="kicker">Latest completed</p><h3>{title}</h3></div></div>{run ? <><strong className="comparison-scenario">{scenarioName(scenarios, run.scenario)}</strong><div className="comparison-metrics"><Summary label="Operations" value={compact(n(run.total_operations))} detail={`${run.concurrency} concurrent`} /><Summary label="P50" value={`${n(run.p50_ms).toFixed(0)} ms`} detail="median" /><Summary label="P99" value={`${n(run.p99_ms).toFixed(0)} ms`} detail="tail" /></div></> : <div className="empty"><Activity /><span>Run a completed {title.split('/')[0].trim()} scenario to populate this comparison.</span></div>}<p className="guidance">{guidance}</p></article>;
+}
+
+function Telemetry({ metrics }: { metrics: Metric[] }) {
+  const width = 800, height = 180, pad = 16;
+  const points = (key: 'operations' | 'p95_ms') => {
+    const max = Math.max(1, ...metrics.map((item) => n(item[key])));
+    return metrics.map((item, index) => `${pad + index / Math.max(1, metrics.length - 1) * (width - 2 * pad)},${height - pad - n(item[key]) / max * (height - 2 * pad)}`).join(' ');
+  };
+  return <div className="telemetry"><div className="chart-heading"><span>One-second intervals</span><span><i className="legend throughput" /> throughput <i className="legend latency" /> p95</span></div>{metrics.length > 1 ? <svg viewBox={`0 0 ${width} ${height}`} role="img" aria-label="Throughput and p95 latency over time"><polyline className="line throughput" points={points('operations')} /><polyline className="line latency" points={points('p95_ms')} /></svg> : <div className="empty"><Activity /><span>Run a scenario to see throughput and latency over time.</span></div>}</div>;
+}
+
+function TabButton({ active, onClick, icon, children }: { active: boolean; onClick: () => void; icon: ReactNode; children: ReactNode }) { return <button className={active ? 'active' : ''} onClick={onClick}>{icon}{children}</button>; }
+function Summary({ label, value, detail }: { label: string; value: string; detail: string }) { return <div className="summary"><span>{label}</span><strong>{value}</strong><small>{detail}</small></div>; }
+function Metric({ icon, label, value, unit }: { icon: ReactNode; label: string; value: string; unit: string }) { return <div className="metric"><span>{icon}{label}</span><strong>{value}<small>{unit}</small></strong></div>; }
+function StateIcon({ state }: { state: Readiness['state'] }) { return <span className={`state-icon ${state}`}>{state === 'ready' ? <Check /> : <CircleAlert />}</span>; }
+function FlowStep({ icon, label, detail }: { icon: ReactNode; label: string; detail: string }) { return <div className="flow-step"><span>{icon}</span><strong>{label}</strong><small>{detail}</small></div>; }
+function Range({ label, value, min, max, step = 1, onChange }: { label: string; value: number; min: number; max: number; step?: number; onChange: (value: number) => void }) { return <label className="range"><span><strong>{label}</strong><output>{value}</output></span><input type="range" value={value} min={min} max={max} step={step} onChange={(event) => onChange(Number(event.target.value))} /></label>; }
+function LoadingState() { return <div className="loading" aria-label="Loading LakeLoad"><span /><span /><span /></div>; }
+function scenarioName(scenarios: Scenario[], id: string) { return scenarios.find((item) => item.id === id)?.name ?? id; }
+function normalizeMetric(metric: Metric): Metric { return { ...metric, elapsed_seconds: n(metric.elapsed_seconds), active_users: n(metric.active_users), operations: n(metric.operations), errors: n(metric.errors), p50_ms: n(metric.p50_ms), p95_ms: n(metric.p95_ms), p99_ms: n(metric.p99_ms) }; }

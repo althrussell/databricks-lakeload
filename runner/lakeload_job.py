@@ -19,7 +19,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--endpoint", required=True)
     parser.add_argument("--host", required=True)
     parser.add_argument("--database", default="databricks_postgres")
-    parser.add_argument("--scenario", choices=["mixed-oltp", "read-heavy", "write-heavy", "complex-queries"], default="mixed-oltp")
+    parser.add_argument(
+        "--scenario",
+        choices=["lakebase-point-lookup", "lakebase-transfer", "lakebase-mixed", "lakebase-operational-join"],
+        default="lakebase-mixed",
+    )
     parser.add_argument("--concurrency", type=int, default=50)
     parser.add_argument("--duration", type=int, default=60)
     parser.add_argument("--seed", type=int, default=424242)
@@ -68,12 +72,12 @@ def percentile(values: list[float], quantile: float) -> float:
 
 def choose_operation(scenario: str, rng: random.Random) -> str:
     roll = rng.random()
-    if scenario == "read-heavy":
-        return "read" if roll < 0.85 else "write" if roll < 0.95 else "complex"
-    if scenario == "write-heavy":
-        return "read" if roll < 0.20 else "write" if roll < 0.90 else "complex"
-    if scenario == "complex-queries":
-        return "read" if roll < 0.25 else "write" if roll < 0.40 else "complex"
+    if scenario == "lakebase-point-lookup":
+        return "read"
+    if scenario == "lakebase-transfer":
+        return "write"
+    if scenario == "lakebase-operational-join":
+        return "complex"
     return "read" if roll < 0.55 else "write" if roll < 0.90 else "complex"
 
 

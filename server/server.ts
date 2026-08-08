@@ -1,4 +1,4 @@
-import { createApp, jobs, lakebase, server } from '@databricks/appkit';
+import { analytics, createApp, jobs, lakebase, server } from '@databricks/appkit';
 import { setupLakeLoadRoutes } from './routes/lakeload/routes';
 
 const disabledCacheStorage = {
@@ -33,7 +33,7 @@ const disabledCacheStorage = {
 
 createApp({
   cache: { enabled: false, storage: disabledCacheStorage },
-  plugins: [lakebase({ pool: { max: 10, connectionTimeoutMillis: 10_000 } }), jobs(), server()],
+  plugins: [lakebase({ pool: { max: 10, connectionTimeoutMillis: 10_000 } }), analytics({ timeout: 110_000 }), jobs(), server()],
   async onPluginsReady(appkit) {
     await setupLakeLoadRoutes(appkit);
   },

@@ -12,9 +12,38 @@ variables:
     description: Lakebase branch used as the isolated load-test target.
   benchmark_postgres_database:
     description: Lakebase database used as the isolated load-test target.
+  benchmark_postgres_endpoint:
+    description: Full endpoint resource name for the runner.
+  benchmark_postgres_host:
+    description: PostgreSQL hostname for the runner.
+  sql_warehouse_id:
+    description: SQL warehouse used for Delta setup and DBSQL comparison scenarios.
+    default: db0ca234f3adcd29
 
 resources:
   jobs:
+    comparison_notebook:
+      name: '[${bundle.target}] LakeLoad DBSQL vs Lakebase notebook'
+      description: 'Paired, reproducible DBSQL and Lakebase workload comparison'
+      tasks:
+        - task_key: compare_engines
+          notebook_task:
+            notebook_path: ./notebooks/dbsql_vs_lakebase.py
+            base_parameters:
+              warehouse_id: ${var.sql_warehouse_id}
+              lakebase_endpoint: ${var.benchmark_postgres_endpoint}
+              lakebase_host: ${var.benchmark_postgres_host}
+              iterations: '20'
+              cache_state: warm
+          environment_key: default
+      environments:
+        - environment_key: default
+          spec:
+            environment_version: '4'
+            dependencies:
+              - databricks-sdk>=0.81.0
+              - psycopg[binary]>=3.1
+
     load_runner:
       name: '[${bundle.target}] LakeLoad distributed runner'
       description: 'Serverless PostgreSQL load generator for Lakebase demonstrations'
@@ -24,7 +53,7 @@ resources:
       performance_target: PERFORMANCE_OPTIMIZED
       parameters:
         - name: scenario
-          default: mixed-oltp
+          default: lakebase-mixed
         - name: concurrency
           default: '50'
         - name: duration
@@ -38,9 +67,9 @@ resources:
             python_file: ./runner/lakeload_job.py
             parameters:
               - --endpoint
-              - projects/lakeload/branches/benchmark/endpoints/primary
+              - ${var.benchmark_postgres_endpoint}
               - --host
-              - ep-damp-salad-d6rrs6m0.database.ap-southeast-2.cloud.databricks.com
+              - ${var.benchmark_postgres_host}
               - --scenario
               - '{{job.parameters.scenario}}'
               - --concurrency
@@ -82,16 +111,19 @@ resources:
           job:
             id: ${resources.jobs.load_runner.id}
             permission: CAN_MANAGE_RUN
+        - name: sql-warehouse
+          sql_warehouse:
+            id: ${var.sql_warehouse_id}
+            permission: CAN_USE
 
 targets:
   default:
     default: true
-    workspace:
-      host: https://dbc-e155652a-2cba.cloud.databricks.com
-
     variables:
       postgres_branch: projects/lakeload/branches/production
       postgres_database: projects/lakeload/branches/production/databases/databricks-postgres
       postgres_project: projects/lakeload
       benchmark_postgres_branch: projects/lakeload/branches/benchmark
       benchmark_postgres_database: projects/lakeload/branches/benchmark/databases/databricks-postgres
+      benchmark_postgres_endpoint: projects/lakeload/branches/benchmark/endpoints/primary
+      benchmark_postgres_host: ep-damp-salad-d6rrs6m0.database.ap-southeast-2.cloud.databricks.com

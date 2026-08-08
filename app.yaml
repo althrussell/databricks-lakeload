@@ -4,11 +4,15 @@ env:
     valueFrom: postgres
   - name: TARGET_LAKEBASE_ENDPOINT
     valueFrom: benchmark-postgres
-  - name: TARGET_PGHOST
-    value: ep-damp-salad-d6rrs6m0.database.ap-southeast-2.cloud.databricks.com
   - name: TARGET_PGDATABASE
     value: databricks_postgres
   - name: TARGET_POOL_SIZE
     value: '80'
   - name: DATABRICKS_JOB_ID
     valueFrom: load-job
+  - name: DATABRICKS_WAREHOUSE_ID
+    valueFrom: sql-warehouse
+  - name: LAKELOAD_CATALOG
+    value: main
+  - name: LAKELOAD_SCHEMA
+    value: lakeload

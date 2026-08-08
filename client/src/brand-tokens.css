@@ -1,0 +1,57 @@
+:root {
+  --db-navy-900: #0b2026;
+  --db-navy-800: #102d35;
+  --db-navy-700: #173c46;
+  --db-navy-600: #285966;
+  --db-ink-100: #e7f1f3;
+  --db-ink-200: #c9dadd;
+  --db-ink-300: #9fb6bb;
+  --db-ink-400: #78949a;
+  --db-light: #f9f7f4;
+  --db-lava-600: #ff3621;
+  --db-lava-700: #d92b1a;
+  --db-cyan-400: #49d5e7;
+  --db-cyan-700: #167f91;
+  --db-green-400: #41c98e;
+  --db-amber-400: #ffbf3f;
+  --db-red-400: #ff7066;
+  --db-indigo-400: #8f87f7;
+  --db-surface: var(--db-navy-900);
+  --db-surface-raised: var(--db-navy-800);
+  --db-surface-subtle: var(--db-navy-700);
+  --db-border: var(--db-navy-600);
+  --db-text: var(--db-ink-100);
+  --db-text-muted: var(--db-ink-300);
+  --db-text-subtle: var(--db-ink-400);
+  --db-accent: var(--db-lava-600);
+  --db-info: var(--db-cyan-400);
+  --db-success: var(--db-green-400);
+  --db-warning: var(--db-amber-400);
+  --db-error: var(--db-red-400);
+  --db-font-primary: 'DM Sans', 'Arial', sans-serif;
+  --db-font-mono: 'DM Mono', 'SFMono-Regular', monospace;
+  --db-space-1: 0.25rem;
+  --db-space-2: 0.5rem;
+  --db-space-3: 0.75rem;
+  --db-space-4: 1rem;
+  --db-space-5: 1.5rem;
+  --db-space-6: 2rem;
+  --db-space-7: 3rem;
+  --db-radius-sm: 0.25rem;
+  --db-radius-md: 0.5rem;
+  --db-radius-lg: 0.75rem;
+  --db-duration-instant: 100ms;
+  --db-duration-fast: 150ms;
+  --db-duration-state: 250ms;
+  --db-ease-quart: cubic-bezier(0.25, 1, 0.5, 1);
+  --db-shadow: 0 1rem 3rem rgb(0 0 0 / 20%);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    transition-duration: 0.01ms !important;
+  }
+}
