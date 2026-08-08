@@ -94,11 +94,14 @@ test('wide console is centered within the space beside the navigation rail', asy
 test('chart samples can be inspected with pointer and keyboard', async ({ page }, testInfo) => {
   test.skip(remoteOnly, 'deployed chart interaction test');
   await page.goto('/');
-  const chart = page.locator('.charts-grid svg[aria-label*="updated every second"]').first();
+  const throughputCard = page
+    .locator('.charts-grid .telemetry-chart')
+    .filter({ has: page.getByRole('heading', { name: 'Throughput', exact: true }) });
+  const chart = throughputCard.locator('svg[aria-label*="updated every second"]');
   await expect(chart).toBeVisible();
 
   await chart.hover({ position: { x: 160, y: 80 } });
-  const tooltip = page.locator('.charts-grid .chart-tooltip').first();
+  const tooltip = throughputCard.locator('.chart-tooltip');
   await expect(tooltip).toBeVisible();
   await expect(tooltip.getByText('Sample', { exact: true })).toBeVisible();
   await expect(tooltip.getByText('completed', { exact: true })).toBeVisible();

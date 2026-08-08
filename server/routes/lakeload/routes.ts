@@ -3,7 +3,14 @@ import { createLakebasePool, getWorkspaceClient } from '@databricks/appkit';
 import { z } from 'zod';
 import { DbsqlEngine, type DbsqlRunConfig } from '../../lakeload/dbsql-engine';
 import { LoadEngine, type RunConfig } from '../../lakeload/engine';
-import { SCENARIOS, scenarioById, type ScenarioId } from '../../lakeload/scenarios';
+import { LtapEngine, type LtapRunConfig } from '../../lakeload/ltap-engine';
+import {
+  LAKEBASE_LOAD_SCENARIOS,
+  LTAP_SCENARIOS,
+  SCENARIOS,
+  scenarioById,
+  type ScenarioId,
+} from '../../lakeload/scenarios';
 import { WarehouseAnalyticsClient } from '../../lakeload/warehouse-analytics';
 
 interface Queryable {
@@ -119,6 +126,10 @@ const CONTROL_SCHEMA_SQL = `
   ALTER TABLE lakeload_control.run_metric ADD COLUMN IF NOT EXISTS max_ms DOUBLE PRECISION NOT NULL DEFAULT 0;
   ALTER TABLE lakeload_control.run_metric ADD COLUMN IF NOT EXISTS phase TEXT NOT NULL DEFAULT 'measure';
   ALTER TABLE lakeload_control.run_metric ADD COLUMN IF NOT EXISTS target_rps DOUBLE PRECISION NOT NULL DEFAULT 0;
+  ALTER TABLE lakeload_control.run_metric ADD COLUMN IF NOT EXISTS feature_stage TEXT NOT NULL DEFAULT 'idle';
+  ALTER TABLE lakeload_control.run_metric ADD COLUMN IF NOT EXISTS pg_to_delta_ms DOUBLE PRECISION NOT NULL DEFAULT 0;
+  ALTER TABLE lakeload_control.run_metric ADD COLUMN IF NOT EXISTS analytics_ms DOUBLE PRECISION NOT NULL DEFAULT 0;
+  ALTER TABLE lakeload_control.run_metric ADD COLUMN IF NOT EXISTS delta_to_pg_ms DOUBLE PRECISION NOT NULL DEFAULT 0;
   CREATE INDEX IF NOT EXISTS run_metric_run_time_idx ON lakeload_control.run_metric(run_id, recorded_at);
   CREATE TABLE IF NOT EXISTS lakeload_control.branch_operation (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(), kind TEXT NOT NULL, branch_name TEXT NOT NULL,
@@ -189,6 +200,16 @@ function dbsqlSetup(namespace: string) {
    1+pmod(id*104729,1000000) AS counterparty_id, 1+pmod(id,10000) AS product_id,
    CAST((pmod(id,20001)-10000)/100.0 AS DECIMAL(10,2)) AS amount,
    timestampadd(SECOND,-pmod(id,2592000),current_timestamp()) AS created_at FROM range(1,5000001)`,
+    `CREATE TABLE IF NOT EXISTS ${namespace}.lakeload_serving_profile (
+      id BIGINT NOT NULL, segment STRING NOT NULL, score INT NOT NULL,
+      version_token STRING NOT NULL, updated_at TIMESTAMP NOT NULL
+    ) USING DELTA TBLPROPERTIES (delta.enableChangeDataFeed = true)`,
+    `MERGE INTO ${namespace}.lakeload_serving_profile t USING (
+      SELECT id,element_at(array('standard','growth','priority'),CAST(1+pmod(id,3) AS INT)) AS segment,
+             CAST(pmod(id*17,100) AS INT) AS score,concat('seed-',id) AS version_token,current_timestamp() AS updated_at
+      FROM range(1,101)
+    ) s ON t.id=s.id WHEN NOT MATCHED THEN INSERT *`,
+    `ALTER TABLE ${namespace}.lakeload_serving_profile SET TBLPROPERTIES (delta.enableChangeDataFeed = true)`,
   ];
 }
 
@@ -240,6 +261,7 @@ export async function setupLakeLoadRoutes(appkit: AppKitServices) {
   };
   const projectName = endpoint.split('/').slice(0, 2).join('/');
   const projectId = projectName.split('/')[1];
+  const lakebaseCatalogId = process.env.LAKELOAD_LAKEBASE_CATALOG ?? `${projectId}_pg`.replace(/-/g, '_');
   const workspaceClient = getWorkspaceClient({});
   if (!host) {
     const endpointResource = (await workspaceClient.apiClient.request({
@@ -272,6 +294,14 @@ export async function setupLakeLoadRoutes(appkit: AppKitServices) {
   const lakebaseEngine = new LoadEngine(targetPool, appkit.lakebase);
   const dbsqlEngine = new DbsqlEngine(warehouseAnalytics, appkit.lakebase, () =>
     dataNamespace(selectedDataDestination)
+  );
+  const cdfTable = () => `${dataNamespace(selectedDataDestination)}.${quoteIdentifier('lb_orders_history')}`;
+  const ltapEngine = new LtapEngine(
+    targetPool,
+    appkit.lakebase,
+    warehouseAnalytics,
+    () => dataNamespace(selectedDataDestination),
+    cdfTable
   );
   let resetActiveId: string | null = null;
   let resetStarting = false;
@@ -327,7 +357,17 @@ export async function setupLakeLoadRoutes(appkit: AppKitServices) {
     try {
       await updateReset(appkit.lakebase, resetId, 'running', 'Removing LakeLoad Delta benchmark tables');
       const namespace = dataNamespace(selectedDataDestination);
-      for (const table of ['lakeload_history', 'lakeload_product', 'lakeload_account']) {
+      try {
+        const syncDelete = await postgresRequest(
+          workspaceClient,
+          `/api/2.0/postgres/synced_tables/${lakebaseCatalogId}.lakeload_sync.serving_profile`,
+          'DELETE'
+        );
+        await waitForPostgresOperation(workspaceClient, operationNameFrom(syncDelete));
+      } catch (error) {
+        console.warn('[lakeload] no synced serving resource to remove, or deletion was unavailable', error);
+      }
+      for (const table of ['lakeload_serving_profile', 'lakeload_history', 'lakeload_product', 'lakeload_account']) {
         await warehouseAnalytics.query(`DROP TABLE IF EXISTS ${namespace}.${quoteIdentifier(table)}`);
       }
 
@@ -351,6 +391,8 @@ export async function setupLakeLoadRoutes(appkit: AppKitServices) {
         `TRUNCATE TABLE lakeload_bench.orders,lakeload_bench.history,lakeload_bench.product,
          lakeload_bench.account,lakeload_bench.dataset_marker RESTART IDENTITY CASCADE`
       );
+      await targetPool.query('TRUNCATE TABLE lakeload_bench.search_document').catch(() => undefined);
+      await targetPool.query('DROP TABLE IF EXISTS lakeload_sync.serving_profile').catch(() => undefined);
 
       await updateReset(appkit.lakebase, resetId, 'running', 'Clearing run history and telemetry');
       await appkit.lakebase.query(
@@ -438,10 +480,10 @@ export async function setupLakeLoadRoutes(appkit: AppKitServices) {
           warehouseType: 'Unknown type',
           serverless: false,
         };
-        const activeId = lakebaseEngine.activeRunId ?? dbsqlEngine.activeRunId;
+        const activeId = lakebaseEngine.activeRunId ?? dbsqlEngine.activeRunId ?? ltapEngine.activeRunId;
         const metrics = activeId ? await metricsFor(appkit.lakebase, activeId) : { rows: [] };
         res.json({
-          scenarios: SCENARIOS,
+          scenarios: scenarioCatalog(readinessCache.value),
           runs: runs.rows,
           activeRunId: activeId,
           activeMetrics: metrics.rows,
@@ -496,7 +538,7 @@ export async function setupLakeLoadRoutes(appkit: AppKitServices) {
           error: 'Catalog and schema names must start with a letter or underscore and use letters, numbers, _ or -.',
         });
       if (resetBusy()) return void res.status(409).json({ error: 'Hard reset is in progress' });
-      if (lakebaseEngine.activeRunId || dbsqlEngine.activeRunId)
+      if (lakebaseEngine.activeRunId || dbsqlEngine.activeRunId || ltapEngine.activeRunId)
         return void res.status(409).json({ error: 'Stop the active benchmark before changing its data destination' });
       const destination = parsed.data;
       try {
@@ -524,7 +566,7 @@ export async function setupLakeLoadRoutes(appkit: AppKitServices) {
       if (!parsed.success)
         return void res.status(400).json({ error: 'Type RESET LAKELOAD exactly to confirm the hard reset' });
       if (resetBusy()) return void res.status(409).json({ error: 'A hard reset is already in progress' });
-      if (lakebaseEngine.activeRunId || dbsqlEngine.activeRunId)
+      if (lakebaseEngine.activeRunId || dbsqlEngine.activeRunId || ltapEngine.activeRunId)
         return void res.status(409).json({ error: 'Stop the active benchmark before hard reset' });
       resetStarting = true;
       try {
@@ -558,7 +600,7 @@ export async function setupLakeLoadRoutes(appkit: AppKitServices) {
       const parsed = WarehouseRequest.safeParse(req.body);
       if (!parsed.success) return void res.status(400).json({ error: 'Invalid SQL warehouse ID' });
       if (resetBusy()) return void res.status(409).json({ error: 'Hard reset is in progress' });
-      if (lakebaseEngine.activeRunId || dbsqlEngine.activeRunId)
+      if (lakebaseEngine.activeRunId || dbsqlEngine.activeRunId || ltapEngine.activeRunId)
         return void res.status(409).json({ error: 'Stop the active benchmark before changing SQL warehouse' });
       try {
         const warehouses = await getWarehouses(true);
@@ -587,9 +629,16 @@ export async function setupLakeLoadRoutes(appkit: AppKitServices) {
       try {
         await prepareLakebase(targetPool);
         await prepareLakebaseAnalyticalHistory(targetPool);
+        const featureSetup = await prepareLakebasePreviewFeatures(targetPool);
         await ensureDataDestination(warehouseAnalytics, selectedDataDestination);
         const namespace = dataNamespace(selectedDataDestination);
         for (const statement of dbsqlSetup(namespace)) await warehouseAnalytics.query(statement);
+        const syncSetup = await ensureSyncedServingTable(
+          workspaceClient,
+          lakebaseCatalogId,
+          endpoint.split('/').slice(0, 4).join('/'),
+          selectedDataDestination
+        ).catch((error) => `Synced-table provisioning pending: ${errorMessage(error)}`);
         const notebookPrincipal = actor(req);
         if (notebookPrincipal !== 'local-operator') {
           const quotedPrincipal = notebookPrincipal.replace(/`/g, '``');
@@ -611,7 +660,10 @@ export async function setupLakeLoadRoutes(appkit: AppKitServices) {
           }
         }
         readinessCache = null;
-        res.json({ status: 'ready', message: 'Lakebase and Delta benchmark datasets are ready.' });
+        res.json({
+          status: 'ready',
+          message: `Lakebase and Delta datasets are ready. ${featureSetup} · ${syncSetup}`,
+        });
       } catch (error) {
         res.status(500).json({ error: `Setup stopped: ${errorMessage(error)}` });
       }
@@ -760,10 +812,18 @@ export async function setupLakeLoadRoutes(appkit: AppKitServices) {
       const parsed = RunRequest.safeParse(req.body);
       if (!parsed.success)
         return void res.status(400).json({ error: 'Invalid run configuration', issues: parsed.error.issues });
-      if (lakebaseEngine.activeRunId || dbsqlEngine.activeRunId)
+      if (lakebaseEngine.activeRunId || dbsqlEngine.activeRunId || ltapEngine.activeRunId)
         return void res.status(409).json({ error: 'Another run is active' });
       const definition = scenarioById.get(parsed.data.scenario as ScenarioId)!;
-      if (!definition.runnable)
+      const currentReadiness = await getReadiness(
+        targetPool,
+        warehouseAnalytics,
+        selectedWarehouseId,
+        displayNamespace(selectedDataDestination),
+        dataNamespace(selectedDataDestination)
+      );
+      const runnableDefinition = scenarioCatalog(currentReadiness).find((scenario) => scenario.id === definition.id)!;
+      if (!runnableDefinition.runnable)
         return void res.status(409).json({
           error: `${definition.name} requires ${definition.prerequisite} setup. Use the readiness instructions first.`,
         });
@@ -813,9 +873,10 @@ export async function setupLakeLoadRoutes(appkit: AppKitServices) {
           ]
         );
         const runId = String(created.rows[0].id);
-        const task =
-          definition.engine === 'dbsql'
-            ? dbsqlEngine.start(runId, config as DbsqlRunConfig)
+        const task = definition.engine === 'dbsql'
+          ? dbsqlEngine.start(runId, config as DbsqlRunConfig)
+          : LTAP_SCENARIOS.has(definition.id)
+            ? ltapEngine.start(runId, config as LtapRunConfig)
             : lakebaseEngine.start(runId, config as RunConfig);
         void task.catch((error) => console.error(`[lakeload] run ${runId} failed`, error));
         res.status(202).json({ runId });
@@ -825,7 +886,7 @@ export async function setupLakeLoadRoutes(appkit: AppKitServices) {
     });
 
     app.delete('/api/lakeload/runs/:id', (req, res) => {
-      if (!lakebaseEngine.cancel(req.params.id) && !dbsqlEngine.cancel(req.params.id))
+      if (!lakebaseEngine.cancel(req.params.id) && !dbsqlEngine.cancel(req.params.id) && !ltapEngine.cancel(req.params.id))
         return void res.status(404).json({ error: 'Active run not found' });
       res.status(202).json({ status: 'cancelling' });
     });
@@ -857,6 +918,72 @@ async function postgresRequest(
     raw: false,
     payload,
   });
+}
+
+async function ensureSyncedServingTable(
+  workspaceClient: WorkspaceClient,
+  lakebaseCatalogId: string,
+  branch: string,
+  destination: DataDestination
+) {
+  const catalogPath = `/api/2.0/postgres/catalogs/${lakebaseCatalogId}`;
+  try {
+    await postgresRequest(workspaceClient, catalogPath, 'GET');
+  } catch (error) {
+    throw new Error(
+      `Registered Lakebase catalog ${lakebaseCatalogId} is unavailable to the App service principal. ` +
+        `Run scripts/bootstrap.py or grant USE CATALOG and CREATE SCHEMA. ${errorMessage(error)}`
+    );
+  }
+
+  const syncedId = `${lakebaseCatalogId}.lakeload_sync.serving_profile`;
+  let existing: unknown = null;
+  try {
+    existing = await postgresRequest(
+      workspaceClient,
+      `/api/2.0/postgres/synced_tables/${syncedId}`,
+      'GET'
+    );
+  } catch {
+    // Not found is the expected first-install path.
+  }
+  if (existing) {
+    const record = existing && typeof existing === 'object' ? (existing as Record<string, unknown>) : {};
+    const status = record.status && typeof record.status === 'object' ? (record.status as Record<string, unknown>) : {};
+    const detailedState = stringField(status.detailed_state);
+    if (!detailedState.includes('FAILED')) {
+      return detailedState.includes('ONLINE')
+        ? 'Continuous synced serving table is online'
+        : `Continuous synced serving table is provisioning (${detailedState || 'pending'})`;
+    }
+    const removed = await postgresRequest(
+      workspaceClient,
+      `/api/2.0/postgres/synced_tables/${syncedId}`,
+      'DELETE'
+    );
+    await waitForPostgresOperation(workspaceClient, operationNameFrom(removed));
+  }
+  await postgresRequest(
+    workspaceClient,
+    '/api/2.0/postgres/synced_tables',
+    'POST',
+    { synced_table_id: syncedId },
+    {
+      spec: {
+        source_table_full_name: `${destination.catalog}.${destination.schema}.lakeload_serving_profile`,
+        primary_key_columns: ['id'],
+        scheduling_policy: 'CONTINUOUS',
+        branch,
+        postgres_database: 'databricks_postgres',
+        create_database_objects_if_missing: true,
+        new_pipeline_spec: {
+          storage_catalog: destination.catalog,
+          storage_schema: destination.schema,
+        },
+      },
+    }
+  );
+  return 'Continuous synced serving table provisioning started';
 }
 
 function branchRows(response: unknown): Record<string, unknown>[] {
@@ -1088,7 +1215,8 @@ async function metricsFor(control: Queryable, runId: string) {
     complex_queries,p50_ms,p95_ms,p99_ms,database_tps,commits,rollbacks,rows_inserted,rows_updated,
     rows_deleted,connections_active,connections_idle,connections_total,locks_waiting,locks_total,
     cache_hit_pct,database_bytes,interval_ms,throughput_rps,offered,dropped,query_errors,mean_ms,max_ms,
-    phase,target_rps FROM lakeload_control.run_metric WHERE run_id=$1 ORDER BY recorded_at`,
+    phase,target_rps,feature_stage,pg_to_delta_ms,analytics_ms,delta_to_pg_ms
+    FROM lakeload_control.run_metric WHERE run_id=$1 ORDER BY recorded_at`,
     [runId]
   );
 }
@@ -1117,6 +1245,10 @@ function metricsCsv(rows: Record<string, unknown>[]) {
     'connections_total',
     'locks_waiting',
     'cache_hit_pct',
+    'feature_stage',
+    'pg_to_delta_ms',
+    'analytics_ms',
+    'delta_to_pg_ms',
   ];
   const escape = (input: unknown) => {
     const text =
@@ -1173,6 +1305,63 @@ async function prepareLakebaseAnalyticalHistory(target: Queryable) {
     WHERE id=1`);
 }
 
+async function prepareLakebasePreviewFeatures(target: Queryable) {
+  await target.query(`DO $$
+    DECLARE r record;
+    BEGIN
+      FOR r IN SELECT table_schema,table_name FROM information_schema.tables
+        WHERE table_schema='lakeload_bench' AND table_type='BASE TABLE'
+      LOOP
+        EXECUTE format('ALTER TABLE %I.%I REPLICA IDENTITY FULL',r.table_schema,r.table_name);
+      END LOOP;
+    END $$`);
+
+  const messages: string[] = ['CDF replica identity configured'];
+  await target.query('CREATE SCHEMA IF NOT EXISTS lakeload_sync');
+  try {
+    await target.query('CREATE EXTENSION IF NOT EXISTS lakebase_vector CASCADE');
+    await target.query('CREATE EXTENSION IF NOT EXISTS lakebase_text');
+    await target.query(`CREATE TABLE IF NOT EXISTS lakeload_bench.search_document (
+      id INTEGER PRIMARY KEY,title TEXT NOT NULL,body TEXT NOT NULL,category TEXT NOT NULL,
+      embedding VECTOR(8) NOT NULL,body_tsv TSVECTOR NOT NULL
+    )`);
+    await target.query(`INSERT INTO lakeload_bench.search_document(id,title,body,category,embedding,body_tsv)
+      SELECT id,
+        (ARRAY['Postgres transaction engine','Lakehouse analytical warehouse','Semantic vector retrieval','Change data capture'])[1+MOD(id,4)],
+        (ARRAY[
+          'Low latency PostgreSQL transactions and indexed operational application requests',
+          'Parallel lakehouse analytics scans joins windows and SQL aggregation',
+          'Vector semantic search recommendations retrieval augmented generation',
+          'Change data capture streams operational updates into governed Delta tables'
+        ])[1+MOD(id,4)],
+        (ARRAY['oltp','olap','search','ltap'])[1+MOD(id,4)],
+        (ARRAY['[1,0,0,0,0,0,0,0]','[0,1,0,0,0,0,0,0]','[0,0,1,0,0,0,0,0]','[0,0,0,1,0,0,0,0]'])[1+MOD(id,4)]::vector,
+        to_tsvector('english',(ARRAY[
+          'Low latency PostgreSQL transactions and indexed operational application requests',
+          'Parallel lakehouse analytics scans joins windows and SQL aggregation',
+          'Vector semantic search recommendations retrieval augmented generation',
+          'Change data capture streams operational updates into governed Delta tables'
+        ])[1+MOD(id,4)])
+      FROM generate_series(1,10000) id ON CONFLICT(id) DO NOTHING`);
+    await target.query(`CREATE INDEX IF NOT EXISTS search_document_embedding_ann
+      ON lakeload_bench.search_document USING lakebase_ann (embedding vector_cosine_ops)`);
+    await target.query(`CREATE INDEX IF NOT EXISTS search_document_body_bm25
+      ON lakeload_bench.search_document USING lakebase_bm25 (body_tsv)`);
+    await target.query('ANALYZE lakeload_bench.search_document');
+    await target.query('ALTER TABLE lakeload_bench.search_document REPLICA IDENTITY FULL');
+    messages.push('Lakebase Search corpus and indexes ready');
+  } catch (error) {
+    messages.push(`Search setup pending: ${errorMessage(error)}`);
+  }
+  try {
+    await target.query('CREATE EXTENSION IF NOT EXISTS pg_stat_statements');
+    messages.push('Postgres query telemetry enabled');
+  } catch (error) {
+    messages.push(`query telemetry pending: ${errorMessage(error)}`);
+  }
+  return messages.join(' · ');
+}
+
 async function getReadiness(
   target: Queryable,
   analytics: AppKitServices['analytics'],
@@ -1184,8 +1373,11 @@ async function getReadiness(
     current_user AS pg_user,
     EXISTS(SELECT 1 FROM pg_extension WHERE extname='wal2delta') AS cdf_installed,
     EXISTS(SELECT 1 FROM pg_available_extensions WHERE name='wal2delta') AS cdf_available,
-    EXISTS(SELECT 1 FROM pg_extension WHERE extname IN ('lakebase_text','lakebase_vector')) AS search_installed,
+    (SELECT COUNT(*)=2 FROM pg_extension WHERE extname IN ('lakebase_text','lakebase_vector')) AS search_installed,
     EXISTS(SELECT 1 FROM pg_available_extensions WHERE name='lakebase_text') AS search_available,
+    to_regclass('lakeload_bench.search_document') IS NOT NULL AS search_table,
+    to_regclass('lakeload_sync.serving_profile') IS NOT NULL AS sync_table,
+    EXISTS(SELECT 1 FROM pg_extension WHERE extname='pg_stat_statements') AS query_telemetry,
     COALESCE(bool_and(c.relreplident='f'),false) AS replica_identity_full
     FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
     WHERE n.nspname='lakeload_bench' AND c.relkind='r'`);
@@ -1206,8 +1398,25 @@ async function getReadiness(
     }
   }
   const pg = checks.rows[0] ?? {};
-  const cdfReady = Boolean(pg.cdf_installed && pg.replica_identity_full && process.env.CDF_DELTA_TABLE);
-  const searchReady = Boolean(pg.search_installed);
+  let cdfDestinationReady = false;
+  try {
+    await analytics.query(`SELECT 1 FROM ${namespace}.${quoteIdentifier('lb_orders_history')} LIMIT 1`);
+    cdfDestinationReady = true;
+  } catch {
+    cdfDestinationReady = false;
+  }
+  const cdfReady = Boolean(pg.cdf_installed && pg.replica_identity_full && cdfDestinationReady);
+  const searchReady = Boolean(pg.search_installed && pg.search_table);
+  const syncReady = Boolean(pg.sync_table);
+  let advancedTelemetryReady = false;
+  try {
+    await analytics.query(`SELECT 1 FROM ${namespace}.${quoteIdentifier('pg_stat_statements_counters')} LIMIT 1`);
+    await analytics.query(`SELECT 1 FROM ${namespace}.${quoteIdentifier('active_session_history')} LIMIT 1`);
+    await analytics.query(`SELECT 1 FROM ${namespace}.${quoteIdentifier('plan_history')} LIMIT 1`);
+    advancedTelemetryReady = true;
+  } catch {
+    advancedTelemetryReady = false;
+  }
   const postgresUser = typeof pg.pg_user === 'string' ? pg.pg_user : 'app service principal';
   return [
     { id: 'lakebase', label: 'Lakebase target', state: 'ready', detail: `Connected as ${postgresUser}` },
@@ -1223,15 +1432,17 @@ async function getReadiness(
       label: 'Lakebase CDF',
       state: cdfReady ? 'ready' : 'action',
       detail: cdfReady
-        ? process.env.CDF_DELTA_TABLE
-        : 'Enable the preview, set REPLICA IDENTITY FULL, and activate CDF in the Lakebase UI.',
+        ? `${destination}.lb_orders_history is queryable and wal2delta is active`
+        : `Preview access is on. In the benchmark branch Lakebase CDF tab, start lakeload_bench → ${destination}.`,
     },
     {
       id: 'sync',
       label: 'Synced table',
-      state: process.env.SYNC_TABLE_NAME ? 'ready' : 'action',
+      state: syncReady ? 'ready' : 'action',
       detail:
-        process.env.SYNC_TABLE_NAME ?? 'Create the Delta-to-Lakebase synced table, then bind SELECT access to the app.',
+        syncReady
+          ? 'lakeload_sync.serving_profile is queryable from Lakebase'
+          : `Create a continuous synced table from ${destination}.lakeload_serving_profile.`,
     },
     {
       id: 'search',
@@ -1244,6 +1455,22 @@ async function getReadiness(
           : 'Search packages are not available in this project.',
     },
     {
+      id: 'query-stats',
+      label: 'Local query statistics',
+      state: pg.query_telemetry ? 'ready' : 'action',
+      detail: pg.query_telemetry
+        ? 'pg_stat_statements query telemetry is available to LakeLoad'
+        : 'Run Prepare to install pg_stat_statements for immediate local query counters.',
+    },
+    {
+      id: 'telemetry',
+      label: 'Advanced telemetry to Delta',
+      state: advancedTelemetryReady ? 'ready' : 'action',
+      detail: advancedTelemetryReady
+        ? `${destination} contains query counters, active sessions, plans, waits, DDL, logs, and compute telemetry`
+        : `Create an Observability config for projects/lakeload and send unprefixed telemetry to ${destination}.`,
+    },
+    {
       id: 'otel',
       label: 'OpenTelemetry',
       state: process.env.OTEL_EXPORTER_OTLP_ENDPOINT ? 'ready' : 'action',
@@ -1252,4 +1479,17 @@ async function getReadiness(
         : 'Configure an external OTLP collector in project settings.',
     },
   ];
+}
+
+function scenarioCatalog(readiness: Array<{ id: string; state: string }>) {
+  const ready = new Set(readiness.filter((item) => item.state === 'ready').map((item) => item.id));
+  return SCENARIOS.map((scenario) => {
+    let runnable = scenario.runnable;
+    if (LAKEBASE_LOAD_SCENARIOS.has(scenario.id) && scenario.prerequisite === 'search') runnable = ready.has('search');
+    if (scenario.id === 'cdf-freshness') runnable = ready.has('cdf');
+    if (scenario.id === 'sync-serving') runnable = ready.has('sync');
+    if (scenario.id === 'ltap-closed-loop') runnable = ready.has('cdf') && ready.has('sync');
+    if (scenario.id === 'telemetry-diagnosis') runnable = ready.has('telemetry');
+    return { ...scenario, runnable };
+  });
 }

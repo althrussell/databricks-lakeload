@@ -45,7 +45,7 @@ Open the App and select **Settings**. **Benchmark destinations** shows the fixed
 - **Create a schema in an existing catalog** when catalog creation is restricted but the App can create schemas in an approved catalog.
 - **Create a catalog and schema** when the App service principal has `CREATE CATALOG`.
 
-LakeLoad validates the destination by creating and removing a permission-check Delta table before saving it. It creates only `lakeload_account`, `lakeload_product`, and `lakeload_history`, so an existing schema can contain other objects safely.
+LakeLoad validates the destination by creating and removing a permission-check Delta table before saving it. It creates only `lakeload_account`, `lakeload_product`, `lakeload_history`, and the synced-table source `lakeload_serving_profile`, so an existing schema can contain other objects safely.
 
 Under **SQL warehouse under test**, choose the DBSQL warehouse and select **Use for DBSQL tests**. Then select **Prepare benchmark data**. Initial preparation normally takes 1–2 minutes; an idempotent rerun in the `labs` environment took about 25 seconds.
 
@@ -183,7 +183,7 @@ Attach the immutable LakeLoad run ID, scenario ID, engine, and operation to trac
 Official guide: [Lakebase CDF](https://docs.databricks.com/aws/en/oltp/projects/lakebase-cdf)
 
 1. Ask a workspace administrator to enable the Lakebase CDF preview.
-2. Set full row images for every captured benchmark table:
+2. Press **Prepare benchmark data**. LakeLoad sets full row images on every table in `lakeload_bench`; the equivalent manual commands include:
 
    ```sql
    ALTER TABLE lakeload_bench.account REPLICA IDENTITY FULL;
@@ -192,9 +192,11 @@ Official guide: [Lakebase CDF](https://docs.databricks.com/aws/en/oltp/projects/
    ALTER TABLE lakeload_bench.orders REPLICA IDENTITY FULL;
    ```
 
-3. In the Lakebase project UI, activate CDF and select the destination catalog/schema.
-4. Add `CDF_DELTA_TABLE=<catalog>.<schema>.<table>` to the App environment and redeploy.
-5. Reload Setup. CDF is ready only when `wal2delta` is installed, replica identity is full, and the destination is configured.
+3. Open `projects/lakeload`, select the `benchmark` branch, open **Lakebase CDF**, and click **Start**.
+4. Select source database `databricks_postgres`, source schema `lakeload_bench`, and destination `main.lakeload` (or the catalog/schema selected in LakeLoad Settings).
+5. Wait for `lb_orders_history` to reach **Streaming**, then reload LakeLoad Settings. The expected lab table is `main.lakeload.lb_orders_history`.
+
+CDF is schema-scoped: current and future non-empty tables in `lakeload_bench` are captured as `lb_<table>_history`. The destination catalog must not use Unity Catalog default storage. The configuring identity needs `USE CATALOG`, `USE SCHEMA`, and `CREATE TABLE` on the destination.
 
 CDF activation is currently a UI operation. It is not safe for the installer to guess a destination or preview setting.
 
@@ -202,13 +204,12 @@ CDF activation is currently a UI operation. It is not safe for the installer to 
 
 Official guide: [Sync tables to Lakebase](https://docs.databricks.com/aws/en/oltp/projects/sync-tables)
 
-1. Create a Delta table with a stable primary key, for example `<catalog>.<schema>.customer_profile`.
-2. Create a Lakebase synced table targeting the benchmark project and database. Use triggered or continuous scheduling according to the freshness test.
-3. Grant the App service principal `USAGE` on the target PostgreSQL schema and `SELECT` on the synced table.
-4. Add `SYNC_TABLE_NAME=<postgres-schema>.<table>` to the App environment and redeploy.
-5. Do not insert, update, or delete rows in the synced table from Lakebase; the sync service owns it.
+1. Run `scripts/bootstrap.py`, then press **Prepare benchmark data**. LakeLoad creates the Delta source `<destination>.lakeload_serving_profile`, enables Delta CDF, and provisions a continuous sync automatically.
+2. Confirm the resource `synced_tables/lakeload_pg.lakeload_sync.serving_profile` is **ONLINE**. The target is `projects/lakeload/branches/benchmark`, database `databricks_postgres`.
+3. Run **Delta → Lakebase serving freshness**. Each cycle updates a version token in Delta and waits until that exact value is queryable from `lakeload_sync.serving_profile`.
+4. Treat the PostgreSQL table as pipeline-owned and read-only. It is owned by the internal `databricks_writer_<dbid>` role; direct writes are not an application persistence mechanism and are overwritten or repopulated by refresh.
 
-LakeLoad keeps this separate from bundle deployment because current bundle/Terraform support does not cover all Lakebase Autoscaling synced-table options.
+Each continuous synced table can use up to 16 Lakebase connections. Continuous and triggered modes require Delta CDF. If an installer chooses a different registered Lakebase catalog ID, set `LAKELOAD_LAKEBASE_CATALOG` consistently before deployment.
 
 ### Lakebase Search
 
@@ -216,18 +217,29 @@ Official guide: [Lakebase Search](https://docs.databricks.com/aws/en/oltp/projec
 
 1. Confirm `lakebase_text` and `lakebase_vector` appear in `pg_available_extensions`.
 2. Review the project restart and irreversibility warning with the operator.
-3. Enable Search in project settings during a maintenance window.
-4. Install the extensions and create the documented indexes in the benchmark branch.
-5. Reload Setup, prepare deterministic text/embedding data, then run keyword, vector, and hybrid tests.
+3. Open `projects/lakeload` → **Settings** → **Lakebase Search** → **Enable Lakebase Search** during a maintenance window.
+4. Wait for every project compute to restart, then press **Prepare benchmark data**. LakeLoad installs `lakebase_vector` and `lakebase_text`, creates a deterministic 10,000-document corpus, and builds ANN and BM25 indexes on the benchmark branch.
+5. Reload Settings. Search is ready only after both extensions and the corpus probe succeed; then run keyword, vector, and hybrid RRF scenarios.
 
 Do not enable Search as part of unattended installation. Enabling it restarts compute and cannot be reversed for the project.
+
+### Advanced Postgres telemetry to Delta
+
+Official guides: [capture telemetry](https://docs.databricks.com/aws/en/oltp/projects/observability-capture) and [telemetry table reference](https://docs.databricks.com/aws/en/oltp/projects/observability-telemetry-reference)
+
+1. Enable the **Lakebase Advanced Postgres Telemetry** workspace preview.
+2. Create the chosen destination schema first. For the lab, use `main.lakeload` and leave the optional table prefix empty so LakeLoad can probe the documented names directly.
+3. In the Observability configuration, select `projects/lakeload`, choose an export identity, and grant it `USE CATALOG`, `USE SCHEMA`, and `CREATE TABLE` on the destination.
+4. For a short lab test, user-level credentials avoid expanding the App service principal's authority. A durable shared service principal currently also requires workspace access, `CAN USE`, and membership in the workspace `admins` group because of a Beta constraint; this is an explicit administrator decision and the bootstrap script does not make it.
+5. Restart an already-running compute after enabling observability, then verify `pg_stat_statements_counters`, `active_session_history`, and `plan_history` contain rows. LakeLoad also expects the broader export surface (`wait_event_counters`, `ddl_history`, `postgres_logs`, `compute_counters`, `compute_gauges`, `database_counters`, and `database_gauges`) for customer investigation.
+6. Run **Advanced telemetry diagnosis** to connect a high-p99 interval to query counters, waits, and plan evidence.
 
 ### OpenTelemetry
 
 Official guide: [Lakebase OpenTelemetry](https://docs.databricks.com/aws/en/oltp/projects/opentelemetry)
 
 1. Provision an OTLP-compatible collector that the Lakebase project can reach.
-2. Configure the project exporter and authentication in Lakebase settings.
+2. In `projects/lakeload` → **Settings** → **Integrations**, configure the exporter base URL and authentication. Lakebase operates the managed collector; the customer supplies the reachable OTLP backend.
 3. Set `OTEL_EXPORTER_OTLP_ENDPOINT` for the App and runner if application spans should use the same collector.
 4. Redact SQL literals and credentials according to customer policy.
 5. Run a short benchmark and confirm the LakeLoad run ID appears in the trace backend before a presentation.
@@ -362,8 +374,10 @@ A restore request uses `kind: "restore"`, the full snapshot resource name as `so
 - **Unity Catalog setup stops:** grant `USE CATALOG` and `CREATE SCHEMA` on the selected catalog to the App service principal. The bootstrap installer performs this grant when the installer identity is authorized.
 - **Lakebase authentication fails:** confirm both Postgres App resources use `CAN_CONNECT_AND_CREATE` and the endpoint is active.
 - **A run fails after App restart:** the App marks interrupted runs failed. Launch a new run; the immutable prior manifest stays in history.
-- **CDF stays setup required:** check preview enablement, `wal2delta`, `REPLICA IDENTITY FULL`, and `CDF_DELTA_TABLE`.
-- **Search stays setup required:** packages being available is not the same as Search being enabled and extensions installed.
+- **CDF stays setup required:** check that CDF is started for `databricks_postgres.lakeload_bench`, every captured table has `REPLICA IDENTITY FULL`, and `<destination>.lb_orders_history` is queryable.
+- **Synced table stays setup required:** press Prepare, inspect `synced_tables/lakeload_pg.lakeload_sync.serving_profile`, and confirm the App identity can query `lakeload_sync.serving_profile`.
+- **Search stays setup required:** workspace preview access and packages in `pg_available_extensions` are not project activation. Enable Search for `projects/lakeload`, wait for compute restart, then press Prepare.
+- **Advanced telemetry stays setup required:** confirm the Observability configuration is assigned to `projects/lakeload`, the export identity has every required permission, compute was restarted, and unprefixed telemetry tables are landing in the selected schema.
 - **The first DBSQL query is slow:** record it as cold start. Run a separate warm trial before comparing steady-state latency.
 - **The UI remains available but a benchmark is saturated:** control metrics are stored in the production branch while load targets the isolated benchmark branch.
 

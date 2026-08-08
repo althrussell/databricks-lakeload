@@ -16,8 +16,8 @@ interface StatementResponse {
     state?: string;
     error?: { error_code?: string; message?: string };
   };
-  result?: unknown;
-  manifest?: unknown;
+  result?: { data_array?: unknown[][] };
+  manifest?: { schema?: { columns?: Array<{ name?: string }> } };
 }
 
 const pause = (milliseconds: number) => new Promise((resolve) => setTimeout(resolve, milliseconds));
@@ -31,6 +31,14 @@ export class WarehouseAnalyticsClient {
 
   query(statement: string, _parameters?: Record<string, unknown>) {
     return this.queryWarehouse(this.selectedWarehouseId(), statement);
+  }
+
+  async queryRows(statement: string) {
+    const response = await this.query(statement);
+    const columns = response.manifest?.schema?.columns?.map((column) => column.name ?? '') ?? [];
+    return (response.result?.data_array ?? []).map((values) =>
+      Object.fromEntries(columns.map((column, index) => [column, values[index]]))
+    );
   }
 
   async queryWarehouse(warehouseId: string, statement: string) {

@@ -16,3 +16,5 @@ env:
     value: main
   - name: LAKELOAD_SCHEMA
     value: lakeload
+  - name: LAKELOAD_LAKEBASE_CATALOG
+    value: lakeload_pg

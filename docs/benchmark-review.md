@@ -57,9 +57,10 @@ The UI declares a comparison decision-grade only when both runs share the method
 | Real-time telemetry | Demand, throughput, latency, errors, drops, connections, locks, cache, churn | Runnable |
 | Branch/snapshot/restore | Snapshot during load and isolated restore compute | Runnable |
 | Evidence export | Manifest/method JSON and metric CSV | Runnable |
-| Lakebase CDF | Commit-to-Delta freshness | Gated by preview activation and `CDF_DELTA_TABLE` |
-| Synced tables | Delta-to-Lakebase serving freshness | Gated by a configured synced table |
+| Lakebase CDF | Commit-to-Delta freshness | Gated by schema-level CDF activation and a queryable `lb_orders_history` destination |
+| Synced tables | Delta-to-Lakebase serving freshness | Runnable; continuous lab sync is online |
 | Lakebase Search | Keyword, vector, and hybrid search | Gated by irreversible project extension enablement |
+| Advanced Postgres telemetry | Query counters, waits, and plan diagnosis | Gated by a project Observability export to the selected schema |
 | OpenTelemetry | Run/trace correlation | Gated by an external OTLP collector |
 
 Preview-gated features remain visible with remediation. LakeLoad does not claim a test ran when its prerequisite is absent.

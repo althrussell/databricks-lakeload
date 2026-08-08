@@ -310,6 +310,9 @@ h3 {
   border-radius: 0.5rem;
   background: rgb(7 24 29 / 48%);
 }
+.engine-switch {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
 .engine-switch button,
 .segmented button {
   min-height: 2.75rem;
@@ -384,6 +387,30 @@ h3 {
 .scenario-card.selected .scenario-radio {
   border: 0.18rem solid var(--db-info);
   box-shadow: 0 0 0.7rem var(--db-info);
+}
+.scenario-empty {
+  grid-column: 1 / -1;
+  min-height: 8rem;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.8rem;
+  padding: 1rem;
+  border: 0.0625rem dashed rgb(120 148 154 / 35%);
+  border-radius: 0.65rem;
+  color: var(--db-text-muted);
+  background: rgb(7 24 29 / 32%);
+}
+.scenario-empty svg {
+  width: 1.15rem;
+  color: var(--db-warning);
+}
+.scenario-empty span {
+  display: grid;
+  gap: 0.25rem;
+}
+.scenario-empty b {
+  color: var(--db-text);
 }
 .controls-grid {
   display: grid;
@@ -1754,6 +1781,30 @@ h3 {
   font-size: 0.7rem;
   line-height: 1.45;
 }
+.preview-boundary {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.8rem;
+  margin: 1rem 0 1.25rem;
+  padding: 1rem;
+  border: 0.0625rem solid rgb(73 213 231 / 25%);
+  border-radius: 0.7rem;
+  background: linear-gradient(135deg, rgb(73 213 231 / 8%), rgb(99 102 241 / 5%));
+}
+.preview-boundary > svg {
+  width: 1.1rem;
+  flex: 0 0 auto;
+  color: var(--db-info);
+}
+.preview-boundary span {
+  display: grid;
+  gap: 0.3rem;
+}
+.preview-boundary small {
+  max-width: 76rem;
+  color: var(--db-text-muted);
+  line-height: 1.55;
+}
 .setup-hero .prepare-note {
   max-width: 70rem;
   color: var(--db-ink-200);
@@ -2197,14 +2248,18 @@ button.history-row:hover {
   margin-top: 1rem;
 }
 .readiness-card {
+  min-width: 0;
   min-height: 5rem;
   display: grid;
-  grid-template-columns: auto 1fr auto;
+  grid-template-columns: auto minmax(0, 1fr) auto;
   align-items: center;
   gap: 0.75rem;
   padding: 0.85rem;
   border: 0.0625rem solid var(--db-border);
   border-radius: 0.6rem;
+}
+.readiness-card > div {
+  min-width: 0;
 }
 .readiness-card > span {
   color: var(--db-success);
@@ -2222,6 +2277,7 @@ button.history-row:hover {
   margin: 0.2rem 0 0;
   color: var(--db-text-muted);
   font-size: 0.7rem;
+  overflow-wrap: anywhere;
 }
 .heading-with-help,
 .badge-with-help,
@@ -2600,6 +2656,16 @@ button.history-row:hover {
   .branch-children {
     min-width: 0;
     width: 100%;
+  }
+  .readiness-card {
+    grid-template-columns: auto minmax(0, 1fr);
+    align-items: start;
+  }
+  .readiness-card > [data-slot='badge'] {
+    grid-column: 2;
+    justify-self: start;
+    max-width: 100%;
+    white-space: normal;
   }
   .operation-feed > div {
     grid-template-columns: auto 3.5rem minmax(0, 1fr);

@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import subprocess
+import time
 from pathlib import Path
 
 from databricks.sdk import WorkspaceClient
@@ -32,6 +33,7 @@ def arguments() -> argparse.Namespace:
     parser.add_argument("--app", default="lakeload", help="Databricks App name")
     parser.add_argument("--warehouse", required=True, help="SQL warehouse ID")
     parser.add_argument("--catalog", default="main", help="Unity Catalog catalog for Delta test data")
+    parser.add_argument("--lakebase-catalog", default="lakeload_pg", help="UC catalog registered to benchmark Postgres")
     parser.add_argument("--target", default="default", help="Bundle target")
     return parser.parse_args()
 
@@ -92,6 +94,31 @@ def run(command: list[str]) -> None:
     subprocess.run(command, cwd=ROOT, check=True)
 
 
+def ensure_lakebase_catalog(profile: str, catalog: str, branch: str) -> None:
+    lookup = subprocess.run(
+        ["databricks", "postgres", "get-catalog", f"catalogs/{catalog}", "-p", profile, "-o", "json"],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+    )
+    if lookup.returncode == 0:
+        print(f"reuse  catalogs/{catalog}")
+        return
+    print(f"create catalogs/{catalog}")
+    run(
+        [
+            "databricks",
+            "postgres",
+            "create-catalog",
+            catalog,
+            "--json",
+            '{"spec":{"postgres_database":"databricks_postgres","branch":"' + branch + '"}}',
+            "-p",
+            profile,
+        ]
+    )
+
+
 def main() -> None:
     args = arguments()
     workspace = WorkspaceClient(profile=args.profile)
@@ -100,6 +127,7 @@ def main() -> None:
     project_name = project.name or f"projects/{args.project}"
     production = f"{project_name}/branches/production"
     benchmark, benchmark_endpoint, benchmark_host = get_or_create_benchmark(workspace, project_name)
+    ensure_lakebase_catalog(args.profile, args.lakebase_catalog, benchmark)
     production_db = f"{production}/databases/databricks-postgres"
     benchmark_db = f"{benchmark}/databases/databricks-postgres"
 
@@ -128,6 +156,12 @@ def main() -> None:
         changes=[PermissionsChange(principal=principal, add=[Privilege.USE_CATALOG, Privilege.CREATE_SCHEMA])],
     )
     print(f"grant  USE CATALOG, CREATE SCHEMA on {args.catalog} to {principal}")
+    workspace.grants.update(
+        "catalog",
+        args.lakebase_catalog,
+        changes=[PermissionsChange(principal=principal, add=[Privilege.USE_CATALOG, Privilege.CREATE_SCHEMA])],
+    )
+    print(f"grant  USE CATALOG, CREATE SCHEMA on {args.lakebase_catalog} to {principal}")
     workspace.permissions.update(
         "database-projects",
         args.project,
@@ -139,6 +173,49 @@ def main() -> None:
         ],
     )
     print(f"grant  CAN MANAGE on Lakebase project {args.project} to {principal}")
+
+    quoted_principal = principal.replace('"', '""')
+    run(
+        [
+            "databricks",
+            "psql",
+            "--project",
+            args.project,
+            "--branch",
+            "benchmark",
+            "--endpoint",
+            "primary",
+            "-p",
+            args.profile,
+            "--",
+            "-v",
+            "ON_ERROR_STOP=1",
+            "-c",
+            f'SET ROLE databricks_superuser; CREATE SCHEMA IF NOT EXISTS lakeload_sync; '
+            f'GRANT USAGE, CREATE ON SCHEMA lakeload_sync TO "{quoted_principal}";',
+        ]
+    )
+    for attempt in range(30):
+        try:
+            workspace.schemas.get(f"{args.lakebase_catalog}.lakeload_sync")
+            break
+        except NotFound:
+            if attempt == 29:
+                raise
+            time.sleep(1)
+    run(
+        [
+            "databricks",
+            "schemas",
+            "update",
+            f"{args.lakebase_catalog}.lakeload_sync",
+            "--owner",
+            principal,
+            "-p",
+            args.profile,
+        ]
+    )
+    print(f"owner  {args.lakebase_catalog}.lakeload_sync -> {principal}")
 
     run(["databricks", "bundle", "run", "app", "-p", args.profile, "-t", args.target])
     app = workspace.apps.get(args.app)

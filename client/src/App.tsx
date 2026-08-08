@@ -109,6 +109,10 @@ interface Metric {
   max_ms: number;
   phase: 'warmup' | 'measure';
   target_rps: number;
+  feature_stage: 'idle' | 'postgres-to-delta' | 'analytics' | 'delta-to-postgres';
+  pg_to_delta_ms: number;
+  analytics_ms: number;
+  delta_to_pg_ms: number;
 }
 
 interface Branch {
@@ -320,6 +324,9 @@ const metricKeys: Array<keyof Metric> = [
   'mean_ms',
   'max_ms',
   'target_rps',
+  'pg_to_delta_ms',
+  'analytics_ms',
+  'delta_to_pg_ms',
 ];
 
 const HELP = {
@@ -327,6 +334,8 @@ const HELP = {
     'Runs the workload directly against Lakebase PostgreSQL. Use it for concurrent transactions, indexed lookups, and application request paths.',
   dbsqlEngine:
     'Runs the workload on the selected Databricks SQL warehouse. Use it for scans, joins, aggregations, and analytical concurrency.',
+  ltapEngine:
+    'Measures the live Lakebase → Delta → DBSQL → synced-table loop. Each boundary remains visible while the data is in flight.',
   concurrentUsers:
     'The number of virtual users allowed to issue requests at the same time. In closed loop, each user waits for its request to finish before sending another.',
   duration: 'How long LakeLoad applies the configured workload after the ramp period begins.',
@@ -369,8 +378,8 @@ const HELP = {
   logicalSize: 'The logical database size represented by the branch. Copy-on-write storage can use less physical storage.',
   benchmarkSeed: 'The deterministic seed keeps generated values and workload choices repeatable across runs.',
   setupPath: 'Choose whether the App service principal uses an existing schema or creates the missing schema and catalog.',
-  catalog: 'The Unity Catalog catalog that contains the three Delta benchmark tables used by DBSQL.',
-  schema: 'The Unity Catalog schema where LakeLoad creates its three prefixed Delta tables.',
+  catalog: 'The Unity Catalog catalog that contains LakeLoad’s four Delta benchmark and serving tables.',
+  schema: 'The Unity Catalog schema where LakeLoad creates its four prefixed Delta tables.',
   validateDestination:
     'Checks that the App service principal can access the destination and create and remove a temporary Delta table. It creates the catalog or schema when that setup path is selected.',
   fixedLakebase:
@@ -380,7 +389,7 @@ const HELP = {
   warehouseState: 'RUNNING starts queries immediately. A stopped warehouse adds startup time to preparation and benchmark runs.',
   readiness: 'A live preflight check of the resources and preview features required by LakeLoad scenarios.',
   hardReset:
-    'Deletes LakeLoad benchmark rows, its three Delta tables, run history, telemetry, snapshots, and restore branches. It keeps the App and base resources.',
+    'Deletes LakeLoad benchmark rows, its four Delta tables, Search corpus, continuous synced-table resource, run history, telemetry, snapshots, and restore branches. It keeps the App, registered Lakebase catalog, and base resources.',
 } as const;
 
 const METRIC_HELP: Partial<Record<MetricKey, string>> = {
@@ -402,6 +411,9 @@ const METRIC_HELP: Partial<Record<MetricKey, string>> = {
   complex_queries: 'Bounded joins or aggregate queries completed by the workload in the latest sample.',
   cache_hit_pct: HELP.cacheHit,
   locks_waiting: HELP.lockWaits,
+  pg_to_delta_ms: 'Elapsed time from the committed PostgreSQL change until its CDF event is queryable in Delta.',
+  analytics_ms: 'Elapsed DBSQL enrichment time between the CDF event and the updated serving table.',
+  delta_to_pg_ms: 'Elapsed time from the Delta serving-table update until the synced row is queryable in Lakebase.',
 };
 
 export default function App() {
@@ -410,7 +422,7 @@ export default function App() {
   const [metrics, setMetrics] = useState<Metric[]>([]);
   const [selectedRunId, setSelectedRunId] = useState<string | null>(null);
   const [selectedScenarioId, setSelectedScenarioId] = useState('lakebase-mixed');
-  const [engineFilter, setEngineFilter] = useState<'lakebase' | 'dbsql'>('lakebase');
+  const [engineFilter, setEngineFilter] = useState<Engine>('lakebase');
   const [concurrency, setConcurrency] = useState(50);
   const [duration, setDuration] = useState(60);
   const [ramp, setRamp] = useState(10);
@@ -709,8 +721,8 @@ type LiveConsoleProps = {
   selectedRun?: Run;
   selectedScenario?: Scenario;
   selectedScenarioId: string;
-  engineFilter: 'lakebase' | 'dbsql';
-  setEngineFilter: (value: 'lakebase' | 'dbsql') => void;
+  engineFilter: Engine;
+  setEngineFilter: (value: Engine) => void;
   chooseScenario: (scenario: Scenario) => void;
   concurrency: number;
   setConcurrency: (value: number) => void;
@@ -735,6 +747,11 @@ function LiveConsole(props: LiveConsoleProps) {
   const scenarios = props.overview.scenarios.filter(
     (scenario) => scenario.runnable && scenario.engine === props.engineFilter
   );
+  function selectEngine(engine: Engine) {
+    props.setEngineFilter(engine);
+    const first = props.overview.scenarios.find((scenario) => scenario.runnable && scenario.engine === engine);
+    if (first) props.chooseScenario(first);
+  }
   return (
     <>
       <section className="hero-grid">
@@ -748,7 +765,7 @@ function LiveConsole(props: LiveConsoleProps) {
               <Explained title="Lakebase workloads" description={HELP.lakebaseEngine}>
                 <button
                   className={props.engineFilter === 'lakebase' ? 'active' : ''}
-                  onClick={() => props.setEngineFilter('lakebase')}
+                  onClick={() => selectEngine('lakebase')}
                 >
                   Lakebase
                 </button>
@@ -756,9 +773,17 @@ function LiveConsole(props: LiveConsoleProps) {
               <Explained title="DBSQL workloads" description={HELP.dbsqlEngine}>
                 <button
                   className={props.engineFilter === 'dbsql' ? 'active' : ''}
-                  onClick={() => props.setEngineFilter('dbsql')}
+                  onClick={() => selectEngine('dbsql')}
                 >
                   DBSQL
+                </button>
+              </Explained>
+              <Explained title="LTAP workloads" description={HELP.ltapEngine}>
+                <button
+                  className={props.engineFilter === 'ltap' ? 'active' : ''}
+                  onClick={() => selectEngine('ltap')}
+                >
+                  LTAP
                 </button>
               </Explained>
             </div>
@@ -777,6 +802,15 @@ function LiveConsole(props: LiveConsoleProps) {
                 <code>{scenario.tags.slice(0, 3).join(' · ')}</code>
               </button>
             ))}
+            {scenarios.length === 0 && (
+              <div className="scenario-empty">
+                <CircleAlert />
+                <span>
+                  <b>Finish the preview preflight in Settings</b>
+                  <small>LakeLoad enables this surface only after the live CDF or synced-table probe passes.</small>
+                </span>
+              </div>
+            )}
           </div>
           <div className="controls-grid">
             <Range
@@ -979,6 +1013,20 @@ function LiveConsole(props: LiveConsoleProps) {
           <BottleneckInsight run={props.selectedRun} metric={props.latest} poolSize={props.overview.endpoint.poolSize} />
         )}
         <div className="charts-grid">
+          {props.selectedRun?.engine === 'ltap' && (
+            <LiveChart
+              live={props.selectedRun.status === 'running'}
+              title="LTAP boundary latency"
+              subtitle="Live time spent crossing PostgreSQL CDF, DBSQL enrichment, and the synced-table return path"
+              metrics={props.metrics}
+              unit="ms"
+              series={[
+                { key: 'pg_to_delta_ms', label: 'Postgres → Delta', tone: 'cyan' },
+                { key: 'analytics_ms', label: 'DBSQL enrich', tone: 'indigo' },
+                { key: 'delta_to_pg_ms', label: 'Delta → Postgres', tone: 'green' },
+              ]}
+            />
+          )}
           <LiveChart
             live={props.selectedRun?.status === 'running'}
             title="Throughput"
@@ -2314,7 +2362,7 @@ function SetupView({
             <h2>Prepare benchmark datasets</h2>
             <HelpTip
               label="Prepare benchmark data"
-              description="Creates missing deterministic rows in Lakebase and the selected Unity Catalog schema. Existing benchmark rows are kept."
+              description="Creates missing deterministic data, configures REPLICA IDENTITY FULL, installs available Search and query-telemetry extensions, builds search indexes, enables Delta CDF on the serving source, and starts continuous synced-table provisioning. Existing benchmark rows are kept."
             />
           </div>
           <p>Creates or verifies the fixed-scale datasets used by every Lakebase and DBSQL scenario.</p>
@@ -2343,6 +2391,13 @@ function SetupView({
                 <small>About 25 seconds when data exists · 1–2 minutes after Hard Reset</small>
               </span>
             </div>
+            <div>
+              <Waves />
+              <span>
+                <b>Preview scenario assets</b>
+                <small>Search indexes · CDF-ready tables · continuous Delta → Lakebase serving sync</small>
+              </span>
+            </div>
           </div>
           <p className="prepare-note">
             A stopped {overview.sqlWarehouse.name} warehouse adds startup time. Reruns fill missing seed rows without
@@ -2363,6 +2418,18 @@ function SetupView({
       </div>
       <DataDestinationSettings overview={overview} busy={busy} onChanged={onWarehouseChanged} />
       <WarehouseSettings overview={overview} busy={busy} onChanged={onWarehouseChanged} />
+      <div className="preview-boundary">
+        <ShieldCheck />
+        <span>
+          <b>Workspace previews are access, not configuration</b>
+          <small>
+            Prepare automates reversible LakeLoad-owned setup. Native Lakebase CDF still must be started once on the
+            benchmark branch for <code>lakeload_bench</code> into{' '}
+            <code>{overview.dataDestination.catalog}.{overview.dataDestination.schema}</code>. OpenTelemetry remains gated
+            until you provide a real OTLP destination in project settings.
+          </small>
+        </span>
+      </div>
       <div className="section-heading">
         <div>
           <span className="section-kicker">Environment</span>
@@ -2471,7 +2538,7 @@ function DataDestinationSettings({
         <div>
           <span className="section-kicker">Data location</span>
           <h2>Benchmark destinations</h2>
-          <p>Lakebase uses the database bound to this App. Choose where DBSQL creates its three Delta tables.</p>
+          <p>Lakebase uses the database bound to this App. Choose where LakeLoad creates its four Delta tables.</p>
         </div>
       </div>
       <div className="destination-fixed">
@@ -2561,8 +2628,9 @@ function DataDestinationSettings({
             <code>lakeload_account</code>
             <code>lakeload_product</code>
             <code>lakeload_history</code>
+            <code>lakeload_serving_profile</code>
           </div>
-          <small>Hard Reset drops these three tables. It keeps the catalog, schema, and every other object.</small>
+          <small>Hard Reset drops these four tables. It keeps the catalog, schema, and every other object.</small>
         </div>
       </div>
       {message && <div className={`warehouse-message ${message.kind}`}>{message.text}</div>}
@@ -2771,7 +2839,7 @@ function HardResetSettings({
             <HelpTip label="Hard reset" description={HELP.hardReset} />
           </div>
           <p>
-            Permanently remove Lakebase benchmark rows, the three LakeLoad Delta tables in{' '}
+            Permanently remove Lakebase benchmark rows, Search documents, the four LakeLoad Delta tables in{' '}
             <code>
               {overview.dataDestination.catalog}.{overview.dataDestination.schema}
             </code>
@@ -2808,12 +2876,14 @@ function HardResetSettings({
             All rows in the dedicated <code>lakeload_bench</code> PostgreSQL schema
           </li>
           <li>
-            <code>lakeload_account</code>, <code>lakeload_product</code>, and <code>lakeload_history</code> from{' '}
+            <code>lakeload_account</code>, <code>lakeload_product</code>, <code>lakeload_history</code>, and the synced-table
+            source from{' '}
             <code>
               {overview.dataDestination.catalog}.{overview.dataDestination.schema}
             </code>
           </li>
           <li>All benchmark runs, metrics, snapshots, and restore branches</li>
+          <li>The LakeLoad-owned continuous synced-table resource; an active native CDF audit feed is preserved</li>
         </ul>
         <p>
           Type <code>RESET LAKELOAD</code> to continue. This cannot be undone.
@@ -2871,6 +2941,9 @@ type MetricKey = keyof Pick<
   | 'complex_queries'
   | 'cache_hit_pct'
   | 'locks_waiting'
+  | 'pg_to_delta_ms'
+  | 'analytics_ms'
+  | 'delta_to_pg_ms'
 >;
 type Tone = 'cyan' | 'green' | 'indigo' | 'red' | 'amber';
 

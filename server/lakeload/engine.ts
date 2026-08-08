@@ -5,7 +5,10 @@ export type Scenario =
   | 'lakebase-transfer'
   | 'lakebase-mixed'
   | 'lakebase-operational-join'
-  | 'lakebase-olap-scan';
+  | 'lakebase-olap-scan'
+  | 'search-keyword'
+  | 'search-vector'
+  | 'search-hybrid';
 
 export interface RunConfig {
   scenario: Scenario;
@@ -290,7 +293,12 @@ export class LoadEngine {
     const roll = random();
     if (scenario === 'lakebase-point-lookup') return 'reads';
     if (scenario === 'lakebase-transfer') return 'writes';
-    if (scenario === 'lakebase-operational-join' || scenario === 'lakebase-olap-scan') return 'complex';
+    if (
+      scenario === 'lakebase-operational-join' ||
+      scenario === 'lakebase-olap-scan' ||
+      scenario.startsWith('search-')
+    )
+      return 'complex';
     return roll < 0.55 ? 'reads' : roll < 0.9 ? 'writes' : 'complex';
   }
 
@@ -307,6 +315,43 @@ export class LoadEngine {
     }
 
     if (operation === 'complex') {
+      if (scenario === 'search-keyword') {
+        await this.target.query(
+          `SELECT id,title,body_tsv <@> to_bm25query(to_tsvector('english',$1),'search_document_body_bm25') AS score
+           FROM lakeload_bench.search_document ORDER BY score,id LIMIT 10`,
+          [searchTerm(random)]
+        );
+        return;
+      }
+      if (scenario === 'search-vector') {
+        await this.target.query(
+          `SELECT id,title,embedding <=> $1::vector AS distance
+           FROM lakeload_bench.search_document ORDER BY embedding <=> $1::vector,id LIMIT 10`,
+          [searchVector(random)]
+        );
+        return;
+      }
+      if (scenario === 'search-hybrid') {
+        await this.target.query(
+          `WITH vector_ranked AS (
+             SELECT id,RANK() OVER (ORDER BY distance) AS rank FROM (
+               SELECT id,embedding <=> $1::vector AS distance FROM lakeload_bench.search_document
+               ORDER BY distance,id LIMIT 40
+             ) v
+           ), keyword_ranked AS (
+             SELECT id,RANK() OVER (ORDER BY score) AS rank FROM (
+               SELECT id,body_tsv <@> to_bm25query(to_tsvector('english',$2),'search_document_body_bm25') AS score
+               FROM lakeload_bench.search_document ORDER BY score,id LIMIT 40
+             ) k
+           )
+           SELECT d.id,d.title,COALESCE(1.0/(60+v.rank),0)+COALESCE(1.0/(60+k.rank),0) AS rrf_score
+           FROM lakeload_bench.search_document d
+           LEFT JOIN vector_ranked v ON d.id=v.id LEFT JOIN keyword_ranked k ON d.id=k.id
+           WHERE v.id IS NOT NULL OR k.id IS NOT NULL ORDER BY rrf_score DESC,d.id LIMIT 10`,
+          [searchVector(random), searchTerm(random)]
+        );
+        return;
+      }
       if (scenario === 'lakebase-olap-scan') {
         await this.target.query(`
           SELECT a.region, p.category, COUNT(*)::bigint AS events,
@@ -486,6 +531,22 @@ export class LoadEngine {
       databaseBytes: Number(row.database_bytes ?? 0),
     };
   }
+}
+
+const SEARCH_TERMS = ['postgres transaction', 'lakehouse analytics', 'vector search', 'change data capture'];
+const SEARCH_VECTORS = [
+  '[1,0,0,0,0,0,0,0]',
+  '[0,1,0,0,0,0,0,0]',
+  '[0,0,1,0,0,0,0,0]',
+  '[0,0,0,1,0,0,0,0]',
+];
+
+function searchTerm(random: () => number) {
+  return SEARCH_TERMS[randomInteger(random, 0, SEARCH_TERMS.length)];
+}
+
+function searchVector(random: () => number) {
+  return SEARCH_VECTORS[randomInteger(random, 0, SEARCH_VECTORS.length)];
 }
 
 function emptyCounters(): IntervalCounters {

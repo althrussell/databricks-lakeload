@@ -15,6 +15,7 @@ export type ScenarioId =
   | 'search-keyword'
   | 'search-vector'
   | 'search-hybrid'
+  | 'telemetry-diagnosis'
   | 'otel-correlation';
 
 export interface ScenarioDefinition {
@@ -26,11 +27,29 @@ export interface ScenarioDefinition {
   method: string;
   expected: string;
   runnable: boolean;
-  prerequisite?: 'cdf' | 'sync' | 'search' | 'otel';
+  prerequisite?: 'cdf' | 'sync' | 'search' | 'telemetry' | 'otel';
   defaultConcurrency: number;
   defaultDurationSeconds: number;
   tags: string[];
 }
+
+export const LAKEBASE_LOAD_SCENARIOS = new Set<ScenarioId>([
+  'lakebase-point-lookup',
+  'lakebase-transfer',
+  'lakebase-mixed',
+  'lakebase-operational-join',
+  'lakebase-olap-scan',
+  'search-keyword',
+  'search-vector',
+  'search-hybrid',
+]);
+
+export const LTAP_SCENARIOS = new Set<ScenarioId>([
+  'cdf-freshness',
+  'sync-serving',
+  'ltap-closed-loop',
+  'telemetry-diagnosis',
+]);
 
 export const SCENARIOS: ScenarioDefinition[] = [
   {
@@ -222,6 +241,20 @@ export const SCENARIOS: ScenarioDefinition[] = [
     defaultConcurrency: 20,
     defaultDurationSeconds: 30,
     tags: ['search', 'hybrid', 'rrf'],
+  },
+  {
+    id: 'telemetry-diagnosis',
+    name: 'Telemetry diagnosis',
+    engine: 'ltap',
+    category: 'Observability',
+    question: 'How quickly can a live query be correlated with plans, waits, and resource telemetry in Delta?',
+    method: 'Issue a tagged PostgreSQL probe, poll the advanced telemetry tables, and record capture freshness.',
+    expected: 'Lakebase telemetry joins query statistics, active sessions, plans, waits, DDL, logs, and compute signals.',
+    runnable: false,
+    prerequisite: 'telemetry',
+    defaultConcurrency: 1,
+    defaultDurationSeconds: 60,
+    tags: ['plans', 'waits', 'delta'],
   },
   {
     id: 'otel-correlation',

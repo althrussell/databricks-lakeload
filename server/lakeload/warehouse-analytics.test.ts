@@ -32,4 +32,18 @@ describe('WarehouseAnalyticsClient', () => {
 
     await expect(client.query('SELECT 1')).rejects.toThrow('PERMISSION_DENIED: Cannot use warehouse');
   });
+
+  it('maps inline SQL statement rows by manifest column name', async () => {
+    const request = vi.fn<(input: RequestInput) => Promise<unknown>>().mockResolvedValue({
+      statement_id: 's3',
+      status: { state: 'SUCCEEDED' },
+      manifest: { schema: { columns: [{ name: 'found' }, { name: 'lag_ms' }] } },
+      result: { data_array: [['4', '1250.5']] },
+    });
+    const client = new WarehouseAnalyticsClient({ request }, () => 'warehouse-a');
+
+    await expect(client.queryRows('SELECT 4 AS found, 1250.5 AS lag_ms')).resolves.toEqual([
+      { found: '4', lag_ms: '1250.5' },
+    ]);
+  });
 });

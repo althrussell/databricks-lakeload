@@ -5,10 +5,13 @@ const remoteBaseUrl = process.env.PLAYWRIGHT_BASE_URL;
 
 export default defineConfig({
   testDir: './tests',
-  fullyParallel: true,
+  // Hosted acceptance tests share one benchmark branch and intentionally mutate
+  // its selected warehouse, prepared data, and active run. Keep that suite
+  // serial so reset/setup tests cannot race workload or settings tests.
+  fullyParallel: !remoteBaseUrl,
   forbidOnly: !!process.env.CI,
   retries: process.env.CI ? 2 : 0,
-  workers: process.env.CI ? 1 : undefined,
+  workers: remoteBaseUrl || process.env.CI ? 1 : undefined,
   reporter: 'html',
   expect: {
     timeout: 15_000,
