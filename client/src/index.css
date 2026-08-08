@@ -1408,6 +1408,49 @@ h3 {
   margin: 0.45rem 0 0;
   color: var(--db-text-muted);
 }
+.prepare-copy {
+  min-width: 0;
+  flex: 1;
+}
+.prepare-details {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(11rem, 1fr));
+  gap: var(--db-space-4);
+  margin-top: var(--db-space-4);
+}
+.prepare-details > div {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: start;
+  gap: var(--db-space-2);
+}
+.prepare-details svg {
+  width: 1rem;
+  margin-top: var(--db-space-1);
+  color: var(--db-info);
+}
+.prepare-details span {
+  min-width: 0;
+  display: grid;
+  gap: var(--db-space-1);
+}
+.prepare-details b {
+  font-size: 0.78rem;
+}
+.prepare-details small {
+  color: var(--db-text-muted);
+  font-size: 0.7rem;
+  line-height: 1.45;
+}
+.setup-hero .prepare-note {
+  max-width: 70rem;
+  color: var(--db-ink-200);
+  font-size: 0.75rem;
+}
+.setup-hero > .launch-button {
+  flex: 0 0 auto;
+}
 .warehouse-settings {
   display: grid;
   grid-template-columns: minmax(16rem, 0.8fr) minmax(25rem, 1.2fr);
@@ -1838,6 +1881,12 @@ button.history-row:hover {
   .setup-hero {
     align-items: flex-start;
     flex-direction: column;
+  }
+  .prepare-details {
+    grid-template-columns: 1fr;
+  }
+  .setup-hero > .launch-button {
+    width: 100%;
   }
   .readiness-grid {
     grid-template-columns: 1fr;

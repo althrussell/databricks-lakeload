@@ -1558,16 +1558,48 @@ function SetupView({
   return (
     <section className="setup-section surface">
       <div className="setup-hero">
-        <div>
-          <span className="section-kicker">Environment settings</span>
-          <h2>Configure and prepare</h2>
-          <p>
-            Choose the DBSQL compute under test, then create deterministic Lakebase and Delta datasets. Preparation is
-            idempotent.
+        <div className="prepare-copy">
+          <span className="section-kicker">Benchmark data</span>
+          <h2>Prepare benchmark datasets</h2>
+          <p>Creates or verifies the fixed-scale datasets used by every Lakebase and DBSQL scenario.</p>
+          <div className="prepare-details" aria-label="Preparation details">
+            <div>
+              <Database />
+              <span>
+                <b>Lakebase PostgreSQL</b>
+                <small>10K accounts · 1K products · 5M history rows</small>
+              </span>
+            </div>
+            <div>
+              <Boxes />
+              <span>
+                <b>Unity Catalog Delta</b>
+                <small>1M accounts · 10K products · 5M history rows in main.lakeload</small>
+              </span>
+            </div>
+            <div>
+              <Gauge />
+              <span>
+                <b>Observed preparation time</b>
+                <small>About 25 seconds when data exists · 1–2 minutes after Hard Reset</small>
+              </span>
+            </div>
+          </div>
+          <p className="prepare-note">
+            A stopped {overview.sqlWarehouse.name} warehouse adds startup time. Reruns fill missing seed rows without
+            clearing workload changes or run history; use Hard Reset for a clean baseline.
           </p>
         </div>
         <Button size="lg" className="launch-button" disabled={busy} onClick={() => void onPrepare()}>
-          {busy ? <RefreshCw className="spin" /> : <Database />} Prepare all data
+          {busy ? (
+            <>
+              <RefreshCw className="spin" /> Preparing data · allow up to 2 min
+            </>
+          ) : (
+            <>
+              <Database /> Prepare benchmark data
+            </>
+          )}
         </Button>
       </div>
       <WarehouseSettings overview={overview} busy={busy} onChanged={onWarehouseChanged} />
