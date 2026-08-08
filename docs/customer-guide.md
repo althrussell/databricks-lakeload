@@ -39,7 +39,15 @@ python scripts/bootstrap.py \
 
 The installer is idempotent. It creates or reuses the Lakebase project, benchmark branch, 1–4 CU endpoint, app, jobs, and resource grants. It prints the App URL when deployment succeeds.
 
-Open the App and select **Settings**. Under **SQL warehouse under test**, choose the DBSQL warehouse for the benchmark and select **Use for DBSQL tests**. LakeLoad runs a connection test before persisting the choice. Then select **Prepare all data**. The App service principal creates its PostgreSQL schemas and the `main.lakeload` Unity Catalog schema. This operation can take several minutes the first time because it creates five million deterministic fact rows in both Lakebase and Delta.
+Open the App and select **Settings**. **Benchmark destinations** shows the fixed Lakebase database and configures the Unity Catalog location used by DBSQL. Choose one setup path:
+
+- **Use an existing schema** when the App service principal already has `USE CATALOG`, `USE SCHEMA`, and `CREATE TABLE`.
+- **Create a schema in an existing catalog** when catalog creation is restricted but the App can create schemas in an approved catalog.
+- **Create a catalog and schema** when the App service principal has `CREATE CATALOG`.
+
+LakeLoad validates the destination by creating and removing a permission-check Delta table before saving it. It creates only `lakeload_account`, `lakeload_product`, and `lakeload_history`, so an existing schema can contain other objects safely.
+
+Under **SQL warehouse under test**, choose the DBSQL warehouse and select **Use for DBSQL tests**. Then select **Prepare benchmark data**. Initial preparation normally takes 1–2 minutes; an idempotent rerun in the `labs` environment took about 25 seconds.
 
 The selector lists warehouses visible to the App service principal. The warehouse declared during installation is available automatically. To test another warehouse, grant the LakeLoad App service principal `CAN USE` on it and reopen Settings. The selected ID is persisted in the control database, included in every run manifest, and used for DBSQL setup, standalone workloads, and paired comparisons.
 
@@ -50,11 +58,11 @@ Open **Settings > Hard reset** when the demo environment must be returned to an 
 Hard Reset permanently removes only LakeLoad-owned test artifacts:
 
 - every row in the dedicated `lakeload_bench` PostgreSQL tables;
-- the dedicated `main.lakeload` Delta schema;
+- the three `lakeload_*` Delta benchmark tables in the selected catalog and schema;
 - all run manifests, one-second metrics, and branch-operation history;
 - branches whose IDs match `snapshot-*` or `restore-*`, purged child restores before snapshots.
 
-It preserves the Lakebase project, `production` and `benchmark` branches, database and compute resources, App deployment, and selected SQL warehouse. Active loads and branch operations must finish or be stopped first. When the status reads **Ready for a clean start**, select **Prepare all data** before launching another test.
+It preserves the selected catalog and schema, every non-LakeLoad table, the Lakebase project, `production` and `benchmark` branches, database and compute resources, App deployment, and selected SQL warehouse. Active loads and branch operations must finish or be stopped first. When the status reads **Ready for a clean start**, select **Prepare benchmark data** before launching another test.
 
 ### Why installation has a bootstrap command
 
@@ -108,7 +116,7 @@ Preview features remain disabled until the readiness check passes. LakeLoad neve
 #### Delta point lookup
 
 - Question: What overhead appears when an analytical engine serves one application lookup at a time?
-- Query: one ID filter over `main.lakeload.account`.
+- Query: one ID filter over `<catalog>.<schema>.lakeload_account`.
 - Interpretation: DBSQL can answer this query, but warehouse scheduling and analytical execution are not a substitute for an OLTP request path.
 
 #### Large analytical scan
@@ -194,7 +202,7 @@ CDF activation is currently a UI operation. It is not safe for the installer to 
 
 Official guide: [Sync tables to Lakebase](https://docs.databricks.com/aws/en/oltp/projects/sync-tables)
 
-1. Create a Delta table with a stable primary key, for example `main.lakeload.customer_profile`.
+1. Create a Delta table with a stable primary key, for example `<catalog>.<schema>.customer_profile`.
 2. Create a Lakebase synced table targeting the benchmark project and database. Use triggered or continuous scheduling according to the freshness test.
 3. Grant the App service principal `USAGE` on the target PostgreSQL schema and `SELECT` on the synced table.
 4. Add `SYNC_TABLE_NAME=<postgres-schema>.<table>` to the App environment and redeploy.
@@ -305,7 +313,9 @@ The App UI uses these routes, which are also useful for a smoke harness:
 ```text
 GET    /api/lakeload/overview
 GET    /api/lakeload/warehouses
+GET    /api/lakeload/data-destinations
 POST   /api/lakeload/warehouse
+POST   /api/lakeload/data-destination
 POST   /api/lakeload/hard-reset
 POST   /api/lakeload/setup
 POST   /api/lakeload/runs
@@ -363,4 +373,4 @@ databricks bundle destroy -p <profile> -t default
 databricks postgres delete-project projects/lakeload -p <profile>
 ```
 
-Delete `main.lakeload` only after confirming it contains no customer-owned tables.
+Delete the selected catalog or schema only after confirming it contains no customer-owned objects. LakeLoad cleanup needs to remove only its `lakeload_*` tables.

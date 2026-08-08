@@ -35,7 +35,8 @@ export class DbsqlEngine {
 
   constructor(
     private readonly analytics: AnalyticsClient,
-    private readonly control: ControlDatabase
+    private readonly control: ControlDatabase,
+    private readonly namespace: () => string = () => '`main`.`lakeload`'
   ) {}
 
   get activeRunId() {
@@ -116,22 +117,23 @@ export class DbsqlEngine {
   }
 
   private statement(scenario: DbsqlRunConfig['scenario']) {
+    const namespace = this.namespace();
     if (scenario === 'dbsql-point-lookup') {
-      return `SELECT id, region, balance FROM main.lakeload.account WHERE id = ${randomInt(1, 10_001)}`;
+      return `SELECT id, region, balance FROM ${namespace}.lakeload_account WHERE id = ${randomInt(1, 10_001)}`;
     }
     if (scenario === 'dbsql-window-analysis') {
       return `WITH customer_totals AS (
         SELECT account_id, region, SUM(ABS(amount)) AS total_amount, COUNT(*) AS events
-        FROM main.lakeload.history GROUP BY account_id, region
+        FROM ${namespace}.lakeload_history GROUP BY account_id, region
       ) SELECT account_id, region, total_amount, events,
         DENSE_RANK() OVER (PARTITION BY region ORDER BY total_amount DESC) AS regional_rank
         FROM customer_totals QUALIFY regional_rank <= 100`;
     }
     return `SELECT a.region, p.category, COUNT(*) AS events, SUM(ABS(h.amount)) AS gross_amount,
       APPROX_COUNT_DISTINCT(h.account_id) AS active_accounts
-      FROM main.lakeload.history h
-      JOIN main.lakeload.account a ON a.id = h.account_id
-      JOIN main.lakeload.product p ON p.id = h.product_id
+      FROM ${namespace}.lakeload_history h
+      JOIN ${namespace}.lakeload_account a ON a.id = h.account_id
+      JOIN ${namespace}.lakeload_product p ON p.id = h.product_id
       WHERE h.id <= 5000000
       GROUP BY a.region, p.category ORDER BY gross_amount DESC`;
   }

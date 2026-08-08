@@ -143,7 +143,7 @@ def main() -> None:
     run(["databricks", "bundle", "run", "app", "-p", args.profile, "-t", args.target])
     app = workspace.apps.get(args.app)
     print(f"ready  {app.url}")
-    print("Open the app and click Setup > Prepare all data.")
+    print("Open Settings, choose a benchmark destination, then click Prepare benchmark data.")
 
 
 if __name__ == "__main__":

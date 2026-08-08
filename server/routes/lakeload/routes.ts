@@ -25,6 +25,14 @@ interface SqlWarehouse {
   serverless: boolean;
 }
 
+type DestinationMode = 'existing-schema' | 'create-schema' | 'create-catalog-schema';
+
+interface DataDestination {
+  mode: DestinationMode;
+  catalog: string;
+  schema: string;
+}
+
 const RunRequest = z.object({
   scenario: z.string().refine((value): value is ScenarioId => scenarioById.has(value as ScenarioId)),
   concurrency: z.number().int().min(1).max(150),
@@ -43,6 +51,16 @@ const BranchRequest = z.object({
 
 const WarehouseRequest = z.object({
   warehouseId: z.string().regex(/^[a-zA-Z0-9-]{1,128}$/),
+});
+
+const CatalogIdentifier = z
+  .string()
+  .trim()
+  .regex(/^[A-Za-z_][A-Za-z0-9_-]{0,254}$/);
+const DataDestinationRequest = z.object({
+  mode: z.enum(['existing-schema', 'create-schema', 'create-catalog-schema']),
+  catalog: CatalogIdentifier,
+  schema: CatalogIdentifier,
 });
 
 const HardResetRequest = z.object({
@@ -95,6 +113,9 @@ const CONTROL_SCHEMA_SQL = `
     id INTEGER PRIMARY KEY CHECK (id = 1), sql_warehouse_id TEXT NOT NULL,
     updated_by TEXT NOT NULL, updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
   );
+  ALTER TABLE lakeload_control.app_setting ADD COLUMN IF NOT EXISTS data_catalog TEXT NOT NULL DEFAULT 'main';
+  ALTER TABLE lakeload_control.app_setting ADD COLUMN IF NOT EXISTS data_schema TEXT NOT NULL DEFAULT 'lakeload';
+  ALTER TABLE lakeload_control.app_setting ADD COLUMN IF NOT EXISTS destination_mode TEXT NOT NULL DEFAULT 'create-schema';
   CREATE TABLE IF NOT EXISTS lakeload_control.reset_operation (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(), status TEXT NOT NULL DEFAULT 'queued',
     message TEXT NOT NULL DEFAULT 'Reset queued', branch_count INTEGER NOT NULL DEFAULT 0,
@@ -129,22 +150,23 @@ const BENCHMARK_SCHEMA_SQL = `
   );
 `;
 
-const DBSQL_SETUP = [
-  'CREATE SCHEMA IF NOT EXISTS main.lakeload',
-  `CREATE TABLE IF NOT EXISTS main.lakeload.account USING DELTA AS
+function dbsqlSetup(namespace: string) {
+  return [
+    `CREATE TABLE IF NOT EXISTS ${namespace}.lakeload_account USING DELTA AS
    SELECT id, element_at(array('APAC','AMER','EMEA'), CAST(1 + pmod(id,3) AS INT)) AS region,
    CAST(10000 + pmod(id,5000) AS DECIMAL(14,2)) AS balance FROM range(1,1000001)`,
-  `CREATE TABLE IF NOT EXISTS main.lakeload.product USING DELTA AS
+    `CREATE TABLE IF NOT EXISTS ${namespace}.lakeload_product USING DELTA AS
    SELECT id, element_at(array('Compute','Storage','AI','Platform'),CAST(1+pmod(id,4) AS INT)) AS category,
    concat('Product ',id) AS title, concat('Deterministic benchmark product ',id) AS description,
    CAST(5+pmod(id,995) AS DECIMAL(10,2)) AS price FROM range(1,10001)`,
-  `CREATE TABLE IF NOT EXISTS main.lakeload.history USING DELTA AS
+    `CREATE TABLE IF NOT EXISTS ${namespace}.lakeload_history USING DELTA AS
    SELECT id, 1+pmod(id*7919,1000000) AS account_id,
    element_at(array('APAC','AMER','EMEA'),CAST(1+pmod(id,3) AS INT)) AS region,
    1+pmod(id*104729,1000000) AS counterparty_id, 1+pmod(id,10000) AS product_id,
    CAST((pmod(id,20001)-10000)/100.0 AS DECIMAL(10,2)) AS amount,
    timestampadd(SECOND,-pmod(id,2592000),current_timestamp()) AS created_at FROM range(1,5000001)`,
-];
+  ];
+}
 
 const RUN_SELECT = `SELECT id, scenario, engine, status, concurrency, duration_seconds, ramp_seconds,
   execution_model, target_rps, requested_by, created_at, started_at, completed_at, total_operations,
@@ -181,10 +203,16 @@ export async function setupLakeLoadRoutes(appkit: AppKitServices) {
     [defaultWarehouseId]
   );
   const storedSettings = await appkit.lakebase.query(
-    'SELECT sql_warehouse_id FROM lakeload_control.app_setting WHERE id=1'
+    `SELECT sql_warehouse_id,data_catalog,data_schema,destination_mode
+     FROM lakeload_control.app_setting WHERE id=1`
   );
   const storedWarehouseId = storedSettings.rows[0]?.sql_warehouse_id;
   let selectedWarehouseId = typeof storedWarehouseId === 'string' ? storedWarehouseId : defaultWarehouseId;
+  let selectedDataDestination: DataDestination = {
+    mode: destinationMode(storedSettings.rows[0]?.destination_mode),
+    catalog: stringField(storedSettings.rows[0]?.data_catalog, 'main'),
+    schema: stringField(storedSettings.rows[0]?.data_schema, 'lakeload'),
+  };
   const projectName = endpoint.split('/').slice(0, 2).join('/');
   const projectId = projectName.split('/')[1];
   const workspaceClient = getWorkspaceClient({});
@@ -212,7 +240,9 @@ export async function setupLakeLoadRoutes(appkit: AppKitServices) {
   });
   await ensureLakebaseBenchmarkSchema(targetPool);
   const lakebaseEngine = new LoadEngine(targetPool, appkit.lakebase);
-  const dbsqlEngine = new DbsqlEngine(warehouseAnalytics, appkit.lakebase);
+  const dbsqlEngine = new DbsqlEngine(warehouseAnalytics, appkit.lakebase, () =>
+    dataNamespace(selectedDataDestination)
+  );
   let resetActiveId: string | null = null;
   let resetStarting = false;
   const resetBusy = () => resetStarting || Boolean(resetActiveId);
@@ -235,10 +265,41 @@ export async function setupLakeLoadRoutes(appkit: AppKitServices) {
     return value;
   }
 
+  async function getCatalogs() {
+    const response = await workspaceClient.apiClient.request({
+      path: '/api/2.1/unity-catalog/catalogs',
+      method: 'GET',
+      query: { max_results: 100 },
+      headers: new Headers(),
+      raw: false,
+    });
+    return collectionRows(response, 'catalogs')
+      .map((row) => stringField(row.name))
+      .filter(Boolean)
+      .sort();
+  }
+
+  async function getSchemas(catalog: string) {
+    const response = await workspaceClient.apiClient.request({
+      path: '/api/2.1/unity-catalog/schemas',
+      method: 'GET',
+      query: { catalog_name: catalog, max_results: 100 },
+      headers: new Headers(),
+      raw: false,
+    });
+    return collectionRows(response, 'schemas')
+      .map((row) => stringField(row.name))
+      .filter(Boolean)
+      .sort();
+  }
+
   async function performHardReset(resetId: string) {
     try {
-      await updateReset(appkit.lakebase, resetId, 'running', 'Removing the Delta benchmark schema');
-      await warehouseAnalytics.query('DROP SCHEMA IF EXISTS main.lakeload CASCADE');
+      await updateReset(appkit.lakebase, resetId, 'running', 'Removing LakeLoad Delta benchmark tables');
+      const namespace = dataNamespace(selectedDataDestination);
+      for (const table of ['lakeload_history', 'lakeload_product', 'lakeload_account']) {
+        await warehouseAnalytics.query(`DROP TABLE IF EXISTS ${namespace}.${quoteIdentifier(table)}`);
+      }
 
       const branches = branchRows(
         await postgresRequest(workspaceClient, `/api/2.0/postgres/${projectName}/branches`, 'GET')
@@ -268,7 +329,7 @@ export async function setupLakeLoadRoutes(appkit: AppKitServices) {
       );
       await appkit.lakebase.query(
         `UPDATE lakeload_control.reset_operation SET status='completed',
-         message='Hard reset complete. Prepare all data to start clean tests.',completed_at=NOW() WHERE id=$1`,
+         message='Hard reset complete. Prepare benchmark data to start clean tests.',completed_at=NOW() WHERE id=$1`,
         [resetId]
       );
       branchesCache = [];
@@ -328,7 +389,13 @@ export async function setupLakeLoadRoutes(appkit: AppKitServices) {
         if (!readinessCache || Date.now() - readinessCache.updatedAt > 30_000) {
           readinessCache = {
             updatedAt: Date.now(),
-            value: await getReadiness(targetPool, warehouseAnalytics, selectedWarehouseId),
+            value: await getReadiness(
+              targetPool,
+              warehouseAnalytics,
+              selectedWarehouseId,
+              displayNamespace(selectedDataDestination),
+              dataNamespace(selectedDataDestination)
+            ),
           };
         }
         const selectedWarehouse = (await getWarehouses().catch(() => [])).find(
@@ -354,6 +421,7 @@ export async function setupLakeLoadRoutes(appkit: AppKitServices) {
           branchOperations: operations.rows,
           resetOperation: resets.rows[0] ?? null,
           sqlWarehouse: selectedWarehouse,
+          dataDestination: selectedDataDestination,
           endpoint: {
             project: projectId,
             branch: endpoint.split('/')[3] ?? 'benchmark',
@@ -374,6 +442,50 @@ export async function setupLakeLoadRoutes(appkit: AppKitServices) {
         res.json({ warehouses, selectedWarehouseId });
       } catch (error) {
         res.status(500).json({ error: `Warehouses could not be listed: ${errorMessage(error)}` });
+      }
+    });
+
+    app.get('/api/lakeload/data-destinations', async (req, res) => {
+      try {
+        const catalog = typeof req.query.catalog === 'string' ? req.query.catalog : selectedDataDestination.catalog;
+        const parsedCatalog = CatalogIdentifier.safeParse(catalog);
+        const [catalogs, schemas] = await Promise.all([
+          getCatalogs(),
+          parsedCatalog.success ? getSchemas(parsedCatalog.data).catch(() => []) : Promise.resolve([]),
+        ]);
+        res.json({ catalogs, schemas, selected: selectedDataDestination });
+      } catch (error) {
+        res.status(500).json({ error: `Data destinations could not be listed: ${errorMessage(error)}` });
+      }
+    });
+
+    app.post('/api/lakeload/data-destination', async (req, res) => {
+      const parsed = DataDestinationRequest.safeParse(req.body);
+      if (!parsed.success)
+        return void res.status(400).json({
+          error: 'Catalog and schema names must start with a letter or underscore and use letters, numbers, _ or -.',
+        });
+      if (resetBusy()) return void res.status(409).json({ error: 'Hard reset is in progress' });
+      if (lakebaseEngine.activeRunId || dbsqlEngine.activeRunId)
+        return void res.status(409).json({ error: 'Stop the active benchmark before changing its data destination' });
+      const destination = parsed.data;
+      try {
+        await validateDataDestination(warehouseAnalytics, destination);
+        await appkit.lakebase.query(
+          `UPDATE lakeload_control.app_setting SET data_catalog=$1,data_schema=$2,destination_mode=$3,
+           updated_by=$4,updated_at=NOW() WHERE id=1`,
+          [destination.catalog, destination.schema, destination.mode, actor(req)]
+        );
+        selectedDataDestination = destination;
+        readinessCache = null;
+        res.json({
+          destination,
+          message: `${displayNamespace(destination)} is now the DBSQL benchmark destination. Prepare data before testing.`,
+        });
+      } catch (error) {
+        res.status(403).json({
+          error: `Destination check failed: ${errorMessage(error)} Grant the App service principal the required catalog and schema privileges, then retry.`,
+        });
       }
     });
 
@@ -445,13 +557,30 @@ export async function setupLakeLoadRoutes(appkit: AppKitServices) {
       try {
         await prepareLakebase(targetPool);
         await prepareLakebaseAnalyticalHistory(targetPool);
-        for (const statement of DBSQL_SETUP) await warehouseAnalytics.query(statement);
+        await ensureDataDestination(warehouseAnalytics, selectedDataDestination);
+        const namespace = dataNamespace(selectedDataDestination);
+        for (const statement of dbsqlSetup(namespace)) await warehouseAnalytics.query(statement);
         const notebookPrincipal = actor(req);
         if (notebookPrincipal !== 'local-operator') {
           const quotedPrincipal = notebookPrincipal.replace(/`/g, '``');
-          await warehouseAnalytics.query(`GRANT USE SCHEMA ON SCHEMA main.lakeload TO \`${quotedPrincipal}\``);
-          await warehouseAnalytics.query(`GRANT SELECT ON SCHEMA main.lakeload TO \`${quotedPrincipal}\``);
+          try {
+            await warehouseAnalytics.query(
+              `GRANT USE CATALOG ON CATALOG ${quoteIdentifier(selectedDataDestination.catalog)} TO \`${quotedPrincipal}\``
+            );
+            await warehouseAnalytics.query(`GRANT USE SCHEMA ON SCHEMA ${namespace} TO \`${quotedPrincipal}\``);
+            for (const table of ['lakeload_account', 'lakeload_product', 'lakeload_history']) {
+              await warehouseAnalytics.query(
+                `GRANT SELECT ON TABLE ${namespace}.${quoteIdentifier(table)} TO \`${quotedPrincipal}\``
+              );
+            }
+          } catch (error) {
+            console.warn(
+              '[lakeload] benchmark tables prepared but notebook grants require an owner or metastore admin',
+              error
+            );
+          }
         }
+        readinessCache = null;
         res.json({ status: 'ready', message: 'Lakebase and Delta benchmark datasets are ready.' });
       } catch (error) {
         res.status(500).json({ error: `Setup stopped: ${errorMessage(error)}` });
@@ -586,8 +715,8 @@ export async function setupLakeLoadRoutes(appkit: AppKitServices) {
             JSON.stringify(config),
             JSON.stringify({
               seed: 424242,
-              catalog: 'main',
-              schema: 'lakeload',
+              catalog: selectedDataDestination.catalog,
+              schema: selectedDataDestination.schema,
               endpoint: endpoint.split('/').slice(-1)[0],
               sql_warehouse_id: selectedWarehouseId,
               sql_warehouse_name:
@@ -668,6 +797,46 @@ function booleanField(value: unknown) {
 
 function stringField(value: unknown, fallback = '') {
   return typeof value === 'string' || typeof value === 'number' ? String(value) : fallback;
+}
+
+function destinationMode(value: unknown): DestinationMode {
+  return value === 'existing-schema' || value === 'create-catalog-schema' ? value : 'create-schema';
+}
+
+function quoteIdentifier(value: string) {
+  return `\`${value.replace(/`/g, '``')}\``;
+}
+
+function dataNamespace(destination: DataDestination) {
+  return `${quoteIdentifier(destination.catalog)}.${quoteIdentifier(destination.schema)}`;
+}
+
+function displayNamespace(destination: DataDestination) {
+  return `${destination.catalog}.${destination.schema}`;
+}
+
+async function ensureDataDestination(analytics: AppKitServices['analytics'], destination: DataDestination) {
+  if (destination.mode === 'create-catalog-schema') {
+    await analytics.query(`CREATE CATALOG IF NOT EXISTS ${quoteIdentifier(destination.catalog)}`);
+  }
+  if (destination.mode !== 'existing-schema') {
+    await analytics.query(`CREATE SCHEMA IF NOT EXISTS ${dataNamespace(destination)}`);
+  } else {
+    await analytics.query(`DESCRIBE SCHEMA ${dataNamespace(destination)}`);
+  }
+}
+
+async function validateDataDestination(analytics: AppKitServices['analytics'], destination: DataDestination) {
+  await ensureDataDestination(analytics, destination);
+  const namespace = dataNamespace(destination);
+  const table = quoteIdentifier(`_lakeload_permission_check_${Date.now()}`);
+  let created = false;
+  try {
+    await analytics.query(`CREATE TABLE ${namespace}.${table} USING DELTA AS SELECT 1 AS permission_check`);
+    created = true;
+  } finally {
+    if (created) await analytics.query(`DROP TABLE ${namespace}.${table}`);
+  }
 }
 
 function toSqlWarehouse(row: Record<string, unknown>): SqlWarehouse {
@@ -863,7 +1032,13 @@ async function prepareLakebaseAnalyticalHistory(target: Queryable) {
   await target.query('ANALYZE lakeload_bench.history');
 }
 
-async function getReadiness(target: Queryable, analytics: AppKitServices['analytics'], warehouseId?: string) {
+async function getReadiness(
+  target: Queryable,
+  analytics: AppKitServices['analytics'],
+  warehouseId?: string,
+  destination = 'main.lakeload',
+  namespace = '`main`.`lakeload`'
+) {
   const checks = await target.query(`SELECT
     current_user AS pg_user,
     EXISTS(SELECT 1 FROM pg_extension WHERE extname='wal2delta') AS cdf_installed,
@@ -881,6 +1056,14 @@ async function getReadiness(target: Queryable, analytics: AppKitServices['analyt
     dbsqlReady = false;
     dbsqlDetail = errorMessage(error);
   }
+  let catalogReady = dbsqlReady;
+  if (dbsqlReady) {
+    try {
+      await analytics.query(`SELECT 1 FROM ${namespace}.lakeload_account LIMIT 1`);
+    } catch {
+      catalogReady = false;
+    }
+  }
   const pg = checks.rows[0] ?? {};
   const cdfReady = Boolean(pg.cdf_installed && pg.replica_identity_full && process.env.CDF_DELTA_TABLE);
   const searchReady = Boolean(pg.search_installed);
@@ -888,7 +1071,12 @@ async function getReadiness(target: Queryable, analytics: AppKitServices['analyt
   return [
     { id: 'lakebase', label: 'Lakebase target', state: 'ready', detail: `Connected as ${postgresUser}` },
     { id: 'dbsql', label: 'DBSQL warehouse', state: dbsqlReady ? 'ready' : 'blocked', detail: dbsqlDetail },
-    { id: 'catalog', label: 'Unity Catalog dataset', state: dbsqlReady ? 'ready' : 'blocked', detail: 'main.lakeload' },
+    {
+      id: 'catalog',
+      label: 'Unity Catalog destination',
+      state: catalogReady ? 'ready' : 'action',
+      detail: catalogReady ? destination : `${destination} selected; prepare benchmark data`,
+    },
     {
       id: 'cdf',
       label: 'Lakebase CDF',

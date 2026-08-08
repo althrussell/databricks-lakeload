@@ -38,10 +38,15 @@ test('LakeLoad renders the workload console', async ({ page }) => {
   await expect(page.locator('.comparison-lane.dbsql')).toContainText('DBSQL');
   await page.getByRole('button', { name: 'Settings', exact: true }).click();
   await expect(page.getByRole('heading', { name: 'Prepare benchmark datasets', exact: true })).toBeVisible();
-  await expect(page.getByText('Lakebase PostgreSQL', { exact: true })).toBeVisible();
+  await expect(page.getByLabel('Preparation details').getByText('Lakebase PostgreSQL', { exact: true })).toBeVisible();
   await expect(page.getByText('Unity Catalog Delta', { exact: true })).toBeVisible();
   await expect(page.getByText('Observed preparation time', { exact: true })).toBeVisible();
   await expect(page.getByRole('button', { name: 'Prepare benchmark data', exact: true })).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Benchmark destinations', exact: true })).toBeVisible();
+  await expect(page.getByText('Fixed App resource', { exact: true })).toBeVisible();
+  await expect(page.getByLabel('Benchmark catalog')).toBeVisible();
+  await expect(page.getByLabel('Benchmark schema')).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Validate and save destination', exact: true })).toBeVisible();
   await expect(page.getByRole('heading', { name: 'SQL warehouse under test', exact: true })).toBeVisible();
   await expect(page.getByRole('combobox', { name: 'SQL warehouse' })).toBeVisible();
   const selectedWarehouse = page.getByRole('button', { name: 'Selected for DBSQL tests', exact: true });
@@ -56,5 +61,17 @@ test('LakeLoad hard reset remains usable without mobile overflow', async ({ page
   await page.getByRole('button', { name: 'Settings', exact: true }).click();
   await expect(page.getByRole('heading', { name: 'Hard reset all test data', exact: true })).toBeVisible();
   await expect(page.getByRole('button', { name: 'Hard reset', exact: true })).toBeVisible();
-  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBeTruthy();
+  const overflow = await page.evaluate(() => ({
+    viewport: window.innerWidth,
+    documentWidth: document.documentElement.scrollWidth,
+    elements: [...document.querySelectorAll<HTMLElement>('*')]
+      .map((element) => ({
+        tag: element.tagName,
+        className: element.className.toString(),
+        right: element.getBoundingClientRect().right,
+      }))
+      .filter((element) => element.right > window.innerWidth + 1)
+      .slice(0, 10),
+  }));
+  expect(overflow.documentWidth, JSON.stringify(overflow)).toBeLessThanOrEqual(overflow.viewport);
 });

@@ -128,6 +128,12 @@ interface SqlWarehouse {
   serverless: boolean;
 }
 
+interface DataDestination {
+  mode: 'existing-schema' | 'create-schema' | 'create-catalog-schema';
+  catalog: string;
+  schema: string;
+}
+
 interface ResetOperation {
   id: string;
   status: 'queued' | 'running' | 'completed' | 'failed';
@@ -149,6 +155,7 @@ interface Overview {
   resetOperation: ResetOperation | null;
   target: { database: string; postgres_version: string; accounts: number; products: number; history_rows: number };
   sqlWarehouse: SqlWarehouse;
+  dataDestination: DataDestination;
   endpoint: { project: string; branch: string; endpoint: string; poolSize: number; autoscaling: string };
 }
 
@@ -170,6 +177,7 @@ const EMPTY: Overview = {
     warehouseType: 'Unknown type',
     serverless: false,
   },
+  dataDestination: { mode: 'create-schema', catalog: 'main', schema: 'lakeload' },
   endpoint: { project: 'lakeload', branch: 'benchmark', endpoint: 'primary', poolSize: 80, autoscaling: '1–4 CU' },
 };
 
@@ -289,7 +297,7 @@ export default function App() {
   const [executionModel, setExecutionModel] = useState<'closed' | 'open'>('closed');
   const [targetRps, setTargetRps] = useState(500);
   const [busy, setBusy] = useState(false);
-  const [loading, setLoading] = useState(true);
+  const [loading, setLoading] = useState(false);
   const [notice, setNotice] = useState<{ kind: 'error' | 'success'; message: string } | null>(null);
   const selectedRunRef = useRef<string | null>(null);
 
@@ -1574,7 +1582,10 @@ function SetupView({
               <Boxes />
               <span>
                 <b>Unity Catalog Delta</b>
-                <small>1M accounts · 10K products · 5M history rows in main.lakeload</small>
+                <small>
+                  1M accounts · 10K products · 5M history rows in {overview.dataDestination.catalog}.
+                  {overview.dataDestination.schema}
+                </small>
               </span>
             </div>
             <div>
@@ -1602,6 +1613,7 @@ function SetupView({
           )}
         </Button>
       </div>
+      <DataDestinationSettings overview={overview} busy={busy} onChanged={onWarehouseChanged} />
       <WarehouseSettings overview={overview} busy={busy} onChanged={onWarehouseChanged} />
       <div className="section-heading">
         <div>
@@ -1624,6 +1636,178 @@ function SetupView({
       </div>
       <HardResetSettings overview={overview} busy={busy} onChanged={onWarehouseChanged} />
     </section>
+  );
+}
+
+function DataDestinationSettings({
+  overview,
+  busy,
+  onChanged,
+}: {
+  overview: Overview;
+  busy: boolean;
+  onChanged: () => Promise<void>;
+}) {
+  const [mode, setMode] = useState<DataDestination['mode']>(overview.dataDestination.mode);
+  const [catalog, setCatalog] = useState(overview.dataDestination.catalog);
+  const [schema, setSchema] = useState(overview.dataDestination.schema);
+  const [catalogs, setCatalogs] = useState<string[]>([]);
+  const [schemas, setSchemas] = useState<string[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [message, setMessage] = useState<{ kind: 'success' | 'error'; text: string } | null>(null);
+
+  const loadDestinations = useCallback(async (catalogName: string) => {
+    setLoading(true);
+    try {
+      const response = await fetch(`/api/lakeload/data-destinations?catalog=${encodeURIComponent(catalogName)}`);
+      const body = (await response.json()) as { catalogs?: string[]; schemas?: string[]; error?: string };
+      if (!response.ok) throw new Error(body.error ?? 'Data destinations could not be loaded.');
+      setCatalogs(body.catalogs ?? []);
+      setSchemas(body.schemas ?? []);
+    } catch (error) {
+      setMessage({ kind: 'error', text: error instanceof Error ? error.message : String(error) });
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (mode !== 'create-catalog-schema') void loadDestinations(catalog);
+  }, [catalog, loadDestinations, mode]);
+
+  useEffect(() => {
+    setMode(overview.dataDestination.mode);
+    setCatalog(overview.dataDestination.catalog);
+    setSchema(overview.dataDestination.schema);
+  }, [
+    overview.dataDestination.catalog,
+    overview.dataDestination.mode,
+    overview.dataDestination.schema,
+  ]);
+
+  async function saveDestination() {
+    setSaving(true);
+    setMessage(null);
+    try {
+      const response = await fetch('/api/lakeload/data-destination', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ mode, catalog, schema }),
+      });
+      const body = (await response.json()) as { message?: string; error?: string };
+      if (!response.ok) throw new Error(body.error ?? 'Data destination could not be saved.');
+      setMessage({ kind: 'success', text: body.message ?? 'Data destination saved.' });
+      await onChanged();
+    } catch (error) {
+      setMessage({ kind: 'error', text: error instanceof Error ? error.message : String(error) });
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  const unchanged =
+    mode === overview.dataDestination.mode &&
+    catalog === overview.dataDestination.catalog &&
+    schema === overview.dataDestination.schema;
+
+  return (
+    <div className="data-destination-settings">
+      <div className="destination-heading">
+        <span className="warehouse-icon">
+          <Database />
+        </span>
+        <div>
+          <span className="section-kicker">Data location</span>
+          <h2>Benchmark destinations</h2>
+          <p>Lakebase uses the database bound to this App. Choose where DBSQL creates its three Delta tables.</p>
+        </div>
+      </div>
+      <div className="destination-fixed">
+        <span>Lakebase PostgreSQL</span>
+        <code>
+          {overview.endpoint.project}/{overview.endpoint.branch}/{overview.target.database}
+        </code>
+        <small>Fixed App resource</small>
+      </div>
+      <div className="destination-form">
+        <label>
+          <span>Setup path</span>
+          <select
+            aria-label="Destination setup path"
+            value={mode}
+            disabled={busy || saving}
+            onChange={(event) => setMode(event.target.value as DataDestination['mode'])}
+          >
+            <option value="existing-schema">Use an existing schema</option>
+            <option value="create-schema">Create a schema in an existing catalog</option>
+            <option value="create-catalog-schema">Create a catalog and schema</option>
+          </select>
+        </label>
+        <label>
+          <span>Catalog</span>
+          {mode === 'create-catalog-schema' ? (
+            <input
+              aria-label="Benchmark catalog"
+              value={catalog}
+              onChange={(event) => setCatalog(event.target.value)}
+            />
+          ) : (
+            <select
+              aria-label="Benchmark catalog"
+              value={catalog}
+              disabled={loading || saving || busy}
+              onChange={(event) => {
+                setCatalog(event.target.value);
+                setSchema('');
+              }}
+            >
+              {!catalogs.includes(catalog) && <option value={catalog}>{catalog}</option>}
+              {catalogs.map((item) => (
+                <option key={item} value={item}>
+                  {item}
+                </option>
+              ))}
+            </select>
+          )}
+        </label>
+        <label>
+          <span>Schema</span>
+          {mode === 'existing-schema' ? (
+            <select
+              aria-label="Benchmark schema"
+              value={schema}
+              disabled={loading || saving || busy}
+              onChange={(event) => setSchema(event.target.value)}
+            >
+              {!schemas.includes(schema) && schema && <option value={schema}>{schema}</option>}
+              {schemas.map((item) => (
+                <option key={item} value={item}>
+                  {item}
+                </option>
+              ))}
+            </select>
+          ) : (
+            <input aria-label="Benchmark schema" value={schema} onChange={(event) => setSchema(event.target.value)} />
+          )}
+        </label>
+        <Button
+          disabled={busy || (mode !== 'create-catalog-schema' && loading) || saving || unchanged || !catalog || !schema}
+          onClick={() => void saveDestination()}
+        >
+          {saving ? <RefreshCw className="spin" /> : <ShieldCheck />} Validate and save destination
+        </Button>
+      </div>
+      <div className="destination-note">
+        <ShieldCheck />
+        <span>
+          LakeLoad creates only <code>lakeload_account</code>, <code>lakeload_product</code>, and{' '}
+          <code>lakeload_history</code>.
+          <small>Hard Reset removes only these tables. Other objects in an existing schema remain unchanged.</small>
+        </span>
+      </div>
+      {message && <div className={`warehouse-message ${message.kind}`}>{message.text}</div>}
+    </div>
   );
 }
 
@@ -1822,8 +2006,11 @@ function HardResetSettings({
           <span className="section-kicker">Danger zone</span>
           <h2>Hard reset all test data</h2>
           <p>
-            Permanently remove Lakebase and Delta benchmark rows, run history, telemetry, and every LakeLoad
-            snapshot/restore branch.
+            Permanently remove Lakebase benchmark rows, the three LakeLoad Delta tables in{' '}
+            <code>
+              {overview.dataDestination.catalog}.{overview.dataDestination.schema}
+            </code>
+            , run history, telemetry, and every LakeLoad snapshot/restore branch.
           </p>
           <small>The Lakebase project, benchmark branch, app deployment, and selected warehouse are preserved.</small>
         </div>
@@ -1856,7 +2043,10 @@ function HardResetSettings({
             All rows in the dedicated <code>lakeload_bench</code> PostgreSQL schema
           </li>
           <li>
-            The dedicated <code>main.lakeload</code> Delta schema
+            <code>lakeload_account</code>, <code>lakeload_product</code>, and <code>lakeload_history</code> from{' '}
+            <code>
+              {overview.dataDestination.catalog}.{overview.dataDestination.schema}
+            </code>
           </li>
           <li>All benchmark runs, metrics, snapshots, and restore branches</li>
         </ul>

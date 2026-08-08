@@ -13,6 +13,7 @@ LakeLoad is a real-time OLTP, OLAP, and LTAP benchmark suite for Databricks Lake
 - readiness and test definitions for CDF, synced tables, Search, OpenTelemetry, and a full closed-loop LTAP flow
 - one-second live charts for workload/database TPS, p50/p95/p99 latency, connections, row churn, workload mix, cache hit rate, and lock waits
 - a persisted Settings selector for choosing and connection-testing the SQL warehouse used by every DBSQL workload
+- Settings choices to use an existing Unity Catalog schema, create a schema in an approved catalog, or create both catalog and schema
 - a guarded Hard Reset that purges only LakeLoad benchmark data, history, telemetry, snapshots, and restores
 - copy-on-write snapshots during active load and non-destructive restore into isolated branches with their own compute
 - deterministic PostgreSQL seed data and persistent run history
@@ -39,7 +40,7 @@ python scripts/bootstrap.py \
   --catalog main
 ```
 
-The installer creates or reuses Lakebase, deploys the App and jobs, binds the SQL warehouse, and grants the App service principal scoped catalog rights. Open the printed App URL and select **Setup > Prepare all data**. No static database password is required.
+The installer creates or reuses Lakebase, deploys the App and jobs, binds the SQL warehouse, and grants the App service principal scoped catalog rights. Open the printed App URL, choose the benchmark destination in **Settings**, then select **Prepare benchmark data**. No static database password is required.
 
 For local development, copy `.env.example` to `.env`, fill in the two endpoints and your Databricks login as `PGUSER`, then run `npm run dev`. The file is git-ignored.
 

@@ -16,6 +16,8 @@
 # COMMAND ----------
 
 dbutils.widgets.text("warehouse_id", "", "DBSQL warehouse ID")
+dbutils.widgets.text("catalog", "main", "Benchmark catalog")
+dbutils.widgets.text("schema", "lakeload", "Benchmark schema")
 dbutils.widgets.text("lakebase_endpoint", "projects/lakeload/branches/benchmark/endpoints/primary", "Lakebase endpoint")
 dbutils.widgets.text("lakebase_host", "", "Lakebase host")
 dbutils.widgets.text("iterations", "20", "Iterations")
@@ -35,6 +37,9 @@ from databricks.sdk.service.sql import Disposition, Format
 
 w = WorkspaceClient()
 WAREHOUSE_ID = dbutils.widgets.get("warehouse_id")
+CATALOG = dbutils.widgets.get("catalog")
+SCHEMA = dbutils.widgets.get("schema")
+DBSQL_NAMESPACE = f"`{CATALOG.replace('`', '``')}`.`{SCHEMA.replace('`', '``')}`"
 ENDPOINT = dbutils.widgets.get("lakebase_endpoint")
 HOST = dbutils.widgets.get("lakebase_host")
 ITERATIONS = int(dbutils.widgets.get("iterations"))
@@ -120,7 +125,7 @@ def lakebase_lookup() -> None:
 
 
 def dbsql_lookup() -> None:
-    dbsql(f"SELECT id, region, balance FROM main.lakeload.account WHERE id = {account_id}")
+    dbsql(f"SELECT id, region, balance FROM {DBSQL_NAMESPACE}.lakeload_account WHERE id = {account_id}")
 
 
 lakebase_lookup()
@@ -140,11 +145,11 @@ display(spark.createDataFrame([result.row() for result in lookup_results], "engi
 
 # COMMAND ----------
 
-dbsql_olap = """
+dbsql_olap = f"""
 SELECT h.region, p.category, COUNT(*) AS events, SUM(ABS(h.amount)) AS gross_amount,
        APPROX_COUNT_DISTINCT(h.account_id) AS active_accounts
-FROM main.lakeload.history h
-JOIN main.lakeload.product p ON p.id = pmod(h.product_id, 10000) + 1
+FROM {DBSQL_NAMESPACE}.lakeload_history h
+JOIN {DBSQL_NAMESPACE}.lakeload_product p ON p.id = pmod(h.product_id, 10000) + 1
 GROUP BY h.region, p.category ORDER BY gross_amount DESC
 """
 
