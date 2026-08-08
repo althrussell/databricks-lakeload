@@ -21,8 +21,14 @@ export interface DbsqlRunConfig {
 const delay = (milliseconds: number) => new Promise((resolve) => setTimeout(resolve, milliseconds));
 
 export class DbsqlEngine {
-  private active: { id: string; cancelled: boolean; startedAt: number; success: number; errors: number; users: number } | null =
-    null;
+  private active: {
+    id: string;
+    cancelled: boolean;
+    startedAt: number;
+    success: number;
+    errors: number;
+    users: number;
+  } | null = null;
   private intervalHistogram = new LatencyHistogram();
   private overallHistogram = new LatencyHistogram();
   private interval = { success: 0, errors: 0 };
@@ -49,7 +55,9 @@ export class DbsqlEngine {
     this.overallHistogram.reset();
     this.interval = { success: 0, errors: 0 };
     const endAt = Date.now() + config.durationSeconds * 1000;
-    await this.control.query(`UPDATE lakeload_control.run SET status = 'running', started_at = NOW() WHERE id = $1`, [runId]);
+    await this.control.query(`UPDATE lakeload_control.run SET status = 'running', started_at = NOW() WHERE id = $1`, [
+      runId,
+    ]);
     const timer = setInterval(() => void this.flush(runId), 1000);
     try {
       const workers = Array.from({ length: config.concurrency }, (_, index) => this.worker(index, endAt, config));
@@ -75,10 +83,13 @@ export class DbsqlEngine {
   }
 
   private async worker(index: number, endAt: number, config: DbsqlRunConfig) {
-    await delay(config.rampSeconds <= 0 ? 0 : (index / Math.max(1, config.concurrency - 1)) * config.rampSeconds * 1000);
+    await delay(
+      config.rampSeconds <= 0 ? 0 : (index / Math.max(1, config.concurrency - 1)) * config.rampSeconds * 1000
+    );
     if (!this.active) return;
     this.active.users += 1;
-    const openLoopDelay = config.executionModel === 'open' ? 1000 / Math.max(1, config.targetRps ?? config.concurrency) : 0;
+    const openLoopDelay =
+      config.executionModel === 'open' ? 1000 / Math.max(1, config.targetRps ?? config.concurrency) : 0;
     try {
       while (Date.now() < endAt && this.active && !this.active.cancelled) {
         const started = performance.now();
@@ -106,7 +117,7 @@ export class DbsqlEngine {
 
   private statement(scenario: DbsqlRunConfig['scenario']) {
     if (scenario === 'dbsql-point-lookup') {
-      return `SELECT id, region, balance FROM main.lakeload.account WHERE id = ${randomInt(1, 1_000_001)}`;
+      return `SELECT id, region, balance FROM main.lakeload.account WHERE id = ${randomInt(1, 10_001)}`;
     }
     if (scenario === 'dbsql-window-analysis') {
       return `WITH customer_totals AS (
@@ -116,11 +127,13 @@ export class DbsqlEngine {
         DENSE_RANK() OVER (PARTITION BY region ORDER BY total_amount DESC) AS regional_rank
         FROM customer_totals QUALIFY regional_rank <= 100`;
     }
-    return `SELECT h.region, p.category, COUNT(*) AS events, SUM(ABS(h.amount)) AS gross_amount,
+    return `SELECT a.region, p.category, COUNT(*) AS events, SUM(ABS(h.amount)) AS gross_amount,
       APPROX_COUNT_DISTINCT(h.account_id) AS active_accounts
       FROM main.lakeload.history h
-      JOIN main.lakeload.product p ON p.id = pmod(h.product_id, 10000) + 1
-      GROUP BY h.region, p.category ORDER BY gross_amount DESC`;
+      JOIN main.lakeload.account a ON a.id = h.account_id
+      JOIN main.lakeload.product p ON p.id = h.product_id
+      WHERE h.id <= 5000000
+      GROUP BY a.region, p.category ORDER BY gross_amount DESC`;
   }
 
   private async flush(runId: string) {

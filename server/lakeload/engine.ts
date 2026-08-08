@@ -1,7 +1,12 @@
 import { randomInt } from 'node:crypto';
 import { LatencyHistogram } from './histogram';
 
-export type Scenario = 'lakebase-point-lookup' | 'lakebase-transfer' | 'lakebase-mixed' | 'lakebase-operational-join';
+export type Scenario =
+  | 'lakebase-point-lookup'
+  | 'lakebase-transfer'
+  | 'lakebase-mixed'
+  | 'lakebase-operational-join'
+  | 'lakebase-olap-scan';
 
 export interface RunConfig {
   scenario: Scenario;
@@ -162,7 +167,7 @@ export class LoadEngine {
         const started = performance.now();
         try {
           const operation = this.chooseOperation(config.scenario);
-          await this.execute(operation);
+          await this.execute(operation, config.scenario);
           const elapsed = performance.now() - started;
           this.histogram.observe(elapsed);
           this.overallHistogram.observe(elapsed);
@@ -198,18 +203,21 @@ export class LoadEngine {
         continue;
       }
       const operation = this.chooseOperation(config.scenario);
-      const task = this.executeOnce(operation).finally(() => inFlight.delete(task));
+      const task = this.executeOnce(operation, config.scenario).finally(() => inFlight.delete(task));
       inFlight.add(task);
     }
     await Promise.allSettled(inFlight);
   }
 
-  private async executeOnce(operation: keyof Pick<IntervalCounters, 'reads' | 'writes' | 'complex'>) {
+  private async executeOnce(
+    operation: keyof Pick<IntervalCounters, 'reads' | 'writes' | 'complex'>,
+    scenario: Scenario
+  ) {
     if (!this.activeRun) return;
     const started = performance.now();
     this.activeRun.activeUsers += 1;
     try {
-      await this.execute(operation);
+      await this.execute(operation, scenario);
       const elapsed = performance.now() - started;
       this.histogram.observe(elapsed);
       this.overallHistogram.observe(elapsed);
@@ -231,11 +239,11 @@ export class LoadEngine {
     const roll = Math.random();
     if (scenario === 'lakebase-point-lookup') return 'reads';
     if (scenario === 'lakebase-transfer') return 'writes';
-    if (scenario === 'lakebase-operational-join') return 'complex';
+    if (scenario === 'lakebase-operational-join' || scenario === 'lakebase-olap-scan') return 'complex';
     return roll < 0.55 ? 'reads' : roll < 0.9 ? 'writes' : 'complex';
   }
 
-  private async execute(operation: 'reads' | 'writes' | 'complex') {
+  private async execute(operation: 'reads' | 'writes' | 'complex', scenario: Scenario) {
     if (operation === 'reads') {
       await this.target.query(
         `SELECT a.balance, a.region, p.price
@@ -248,6 +256,20 @@ export class LoadEngine {
     }
 
     if (operation === 'complex') {
+      if (scenario === 'lakebase-olap-scan') {
+        await this.target.query(`
+          SELECT a.region, p.category, COUNT(*)::bigint AS events,
+                 SUM(ABS(h.amount))::numeric AS gross_amount,
+                 COUNT(DISTINCT h.account_id)::bigint AS active_accounts
+          FROM lakeload_bench.history h
+          JOIN lakeload_bench.account a ON a.id = h.account_id
+          JOIN lakeload_bench.product p ON p.id = 1 + MOD(h.counterparty_id - 1, 1000)
+          WHERE h.id <= 5000000
+          GROUP BY a.region, p.category
+          ORDER BY gross_amount DESC
+        `);
+        return;
+      }
       await this.target.query(
         `SELECT a.region, COUNT(h.id)::int AS events, COALESCE(AVG(ABS(h.amount)), 0)::float AS avg_amount
          FROM lakeload_bench.account a

@@ -6,6 +6,7 @@ import {
   Boxes,
   Check,
   CircleAlert,
+  Columns3,
   Database,
   GitBranch,
   Gauge,
@@ -20,7 +21,7 @@ import {
   Zap,
 } from 'lucide-react';
 
-type View = 'live' | 'branches' | 'runs' | 'setup';
+type View = 'live' | 'compare' | 'branches' | 'runs' | 'setup';
 type Engine = 'lakebase' | 'dbsql' | 'ltap';
 
 interface Scenario {
@@ -141,6 +142,78 @@ const EMPTY: Overview = {
   target: { database: 'databricks_postgres', postgres_version: '17', accounts: 0, products: 0, history_rows: 0 },
   endpoint: { project: 'lakeload', branch: 'benchmark', endpoint: 'primary', poolSize: 80, autoscaling: '1–4 CU' },
 };
+
+interface RunDetails {
+  run: Run;
+  metrics: Metric[];
+}
+
+interface ComparisonPreset {
+  id: 'oltp' | 'olap' | 'best-fit';
+  eyebrow: string;
+  title: string;
+  question: string;
+  lakebaseScenario: string;
+  dbsqlScenario: string;
+  concurrency: number;
+  duration: number;
+  ramp: number;
+  method: string;
+  interpretation: string;
+  matched: boolean;
+  minimumHistoryRows?: number;
+}
+
+const COMPARISON_PRESETS: ComparisonPreset[] = [
+  {
+    id: 'oltp',
+    eyebrow: 'OLTP challenge',
+    title: 'Indexed request serving',
+    question: 'Which engine should sit on the synchronous application request path?',
+    lakebaseScenario: 'lakebase-point-lookup',
+    dbsqlScenario: 'dbsql-point-lookup',
+    concurrency: 10,
+    duration: 20,
+    ramp: 3,
+    method: 'The same primary-key lookup, key range, concurrency, duration, and warm-state policy on both engines.',
+    interpretation:
+      'Compare throughput and tail latency. Lakebase is built for concurrent, low-latency request serving.',
+    matched: true,
+  },
+  {
+    id: 'olap',
+    eyebrow: 'OLAP challenge',
+    title: 'Five-million-row scan and join',
+    question: 'Which engine should scan fact history and aggregate across dimensions?',
+    lakebaseScenario: 'lakebase-olap-scan',
+    dbsqlScenario: 'dbsql-olap-scan',
+    concurrency: 1,
+    duration: 20,
+    ramp: 0,
+    method: 'Five million fact rows, account and product joins, grouped aggregation, and matched client pressure.',
+    interpretation:
+      'Compare completed analytical queries and latency. DBSQL is built for parallel analytical execution.',
+    matched: true,
+    minimumHistoryRows: 5_000_000,
+  },
+  {
+    id: 'best-fit',
+    eyebrow: 'Engine-fit story',
+    title: 'Transactions beside analytics',
+    question: 'How do Lakebase and DBSQL divide operational and analytical work?',
+    lakebaseScenario: 'lakebase-mixed',
+    dbsqlScenario: 'dbsql-olap-scan',
+    concurrency: 2,
+    duration: 20,
+    ramp: 2,
+    method:
+      'Lakebase runs mixed application traffic; DBSQL runs the wide historical scan. These are intentionally different jobs.',
+    interpretation:
+      'This is an architecture comparison, not a speed race: each engine runs the workload it is designed to serve.',
+    matched: false,
+    minimumHistoryRows: 5_000_000,
+  },
+];
 
 const value = (input: number | string | null | undefined) => Number(input ?? 0);
 const compact = (input: number) =>
@@ -349,6 +422,9 @@ export default function App() {
           <RailButton label="Live telemetry" active={view === 'live'} onClick={() => setView('live')}>
             <Activity />
           </RailButton>
+          <RailButton label="Compare engines" active={view === 'compare'} onClick={() => setView('compare')}>
+            <Columns3 />
+          </RailButton>
           <RailButton label="Branch lab" active={view === 'branches'} onClick={() => setView('branches')}>
             <GitBranch />
           </RailButton>
@@ -421,6 +497,8 @@ export default function App() {
             progress={progress}
             errorRate={errorRate}
           />
+        ) : view === 'compare' ? (
+          <ComparisonView overview={overview} onOpenSetup={() => setView('setup')} />
         ) : view === 'branches' ? (
           <BranchLab
             overview={overview}
@@ -761,6 +839,412 @@ function DatabaseCore({ overview, latest, running }: { overview: Overview; lates
     </aside>
   );
 }
+
+function ComparisonView({ overview, onOpenSetup }: { overview: Overview; onOpenSetup: () => void }) {
+  const [presetId, setPresetId] = useState<ComparisonPreset['id']>('oltp');
+  const preset = COMPARISON_PRESETS.find((item) => item.id === presetId) ?? COMPARISON_PRESETS[0];
+  const [concurrency, setConcurrency] = useState(preset.concurrency);
+  const [duration, setDuration] = useState(preset.duration);
+  const [ramp, setRamp] = useState(preset.ramp);
+  const [lakebase, setLakebase] = useState<RunDetails | null>(null);
+  const [dbsql, setDbsql] = useState<RunDetails | null>(null);
+  const [phase, setPhase] = useState<'lakebase' | 'dbsql' | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
+  const cancelRequested = useRef(false);
+  const ready = !preset.minimumHistoryRows || overview.target.history_rows >= preset.minimumHistoryRows;
+  const lakebaseScenario = overview.scenarios.find((scenario) => scenario.id === preset.lakebaseScenario);
+  const dbsqlScenario = overview.scenarios.find((scenario) => scenario.id === preset.dbsqlScenario);
+  const latestLakebaseId = overview.runs.find(
+    (run) => run.scenario === preset.lakebaseScenario && run.status === 'completed'
+  )?.id;
+  const latestDbsqlId = overview.runs.find(
+    (run) => run.scenario === preset.dbsqlScenario && run.status === 'completed'
+  )?.id;
+
+  useEffect(() => {
+    setConcurrency(preset.concurrency);
+    setDuration(preset.duration);
+    setRamp(preset.ramp);
+    setError('');
+  }, [preset]);
+
+  useEffect(() => {
+    if (busy) return;
+    let cancelled = false;
+    async function loadLatest() {
+      const [left, right] = await Promise.all([
+        latestLakebaseId ? fetchRunDetails(latestLakebaseId) : Promise.resolve(null),
+        latestDbsqlId ? fetchRunDetails(latestDbsqlId) : Promise.resolve(null),
+      ]);
+      if (!cancelled) {
+        setLakebase(left);
+        setDbsql(right);
+      }
+    }
+    void loadLatest().catch((loadError) => {
+      if (!cancelled) setError(loadError instanceof Error ? loadError.message : String(loadError));
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [busy, latestDbsqlId, latestLakebaseId, presetId]);
+
+  async function startScenario(scenario: string) {
+    for (let attempt = 0; attempt < 5; attempt += 1) {
+      const response = await fetch('/api/lakeload/runs', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          scenario,
+          concurrency,
+          durationSeconds: duration,
+          rampSeconds: ramp,
+          executionModel: 'closed',
+        }),
+      });
+      const body = (await response.json()) as { runId?: string; error?: string };
+      if (response.ok && body.runId) return body.runId;
+      if (response.status !== 409 || attempt === 4) throw new Error(body.error ?? 'Comparison run could not start.');
+      await pause(1_000);
+    }
+    throw new Error('Comparison run could not start.');
+  }
+
+  async function followRun(runId: string, update: (details: RunDetails) => void) {
+    for (let attempt = 0; attempt < duration + 180; attempt += 1) {
+      const details = await fetchRunDetails(runId);
+      update(details);
+      if (['completed', 'cancelled', 'failed'].includes(details.run.status)) return details;
+      await pause(1_000);
+    }
+    throw new Error('Comparison run exceeded its monitoring window.');
+  }
+
+  async function runComparison() {
+    if (!ready || !lakebaseScenario || !dbsqlScenario) return;
+    cancelRequested.current = false;
+    setBusy(true);
+    setError('');
+    setLakebase(null);
+    setDbsql(null);
+    try {
+      setPhase('lakebase');
+      const lakebaseRunId = await startScenario(lakebaseScenario.id);
+      const lakebaseResult = await followRun(lakebaseRunId, setLakebase);
+      if (cancelRequested.current || lakebaseResult.run.status !== 'completed') return;
+
+      await pause(1_000);
+      setPhase('dbsql');
+      const dbsqlRunId = await startScenario(dbsqlScenario.id);
+      await followRun(dbsqlRunId, setDbsql);
+    } catch (comparisonError) {
+      setError(comparisonError instanceof Error ? comparisonError.message : String(comparisonError));
+    } finally {
+      setPhase(null);
+      setBusy(false);
+    }
+  }
+
+  async function stopComparison() {
+    cancelRequested.current = true;
+    const response = await fetch('/api/lakeload/overview');
+    const body = (await response.json()) as Overview;
+    if (body.activeRunId) await fetch(`/api/lakeload/runs/${body.activeRunId}`, { method: 'DELETE' });
+  }
+
+  return (
+    <div className="comparison-workspace">
+      <section className="comparison-hero surface">
+        <div>
+          <span className="section-kicker">Engine comparison</span>
+          <h2>Lakebase and DBSQL, side by side</h2>
+          <p>Run controlled workload pairs, inspect both timelines, and explain which engine fits the job.</p>
+        </div>
+        <div className="comparison-method">
+          <ShieldCheck />
+          <span>
+            Sequential execution
+            <small>Matched settings without cross-engine interference</small>
+          </span>
+        </div>
+      </section>
+
+      <section className="comparison-presets" aria-label="Comparison workload">
+        {COMPARISON_PRESETS.map((item) => (
+          <button
+            key={item.id}
+            className={presetId === item.id ? 'active' : ''}
+            onClick={() => setPresetId(item.id)}
+            disabled={busy}
+          >
+            <span>{item.eyebrow}</span>
+            <strong>{item.title}</strong>
+            <small>{item.question}</small>
+          </button>
+        ))}
+      </section>
+
+      <section className="comparison-control surface">
+        <div className="comparison-definition">
+          <Badge variant="outline">{preset.matched ? 'matched workload' : 'best-fit workloads'}</Badge>
+          <div>
+            <strong>{preset.method}</strong>
+            <p>{preset.interpretation}</p>
+          </div>
+        </div>
+        <div className="comparison-ranges">
+          <Range
+            label="Concurrent clients"
+            value={concurrency}
+            min={1}
+            max={50}
+            onChange={setConcurrency}
+            suffix=" VUs"
+          />
+          <Range
+            label="Per-engine duration"
+            value={duration}
+            min={10}
+            max={60}
+            step={5}
+            onChange={setDuration}
+            suffix=" sec"
+          />
+          <Range label="Ramp" value={ramp} min={0} max={20} step={1} onChange={setRamp} suffix=" sec" />
+        </div>
+        <div className="comparison-launch">
+          <span>
+            Estimated wall time <b>{duration * 2 + 2}s</b>
+          </span>
+          {!ready ? (
+            <Button size="lg" onClick={onOpenSetup}>
+              <Database /> Prepare 5M-row dataset
+            </Button>
+          ) : busy ? (
+            <Button variant="destructive" size="lg" onClick={() => void stopComparison()}>
+              <Square /> Stop comparison
+            </Button>
+          ) : (
+            <Button
+              size="lg"
+              className="launch-button"
+              disabled={Boolean(overview.activeRunId)}
+              onClick={() => void runComparison()}
+            >
+              <Play /> Run matched comparison
+            </Button>
+          )}
+        </div>
+        {error && (
+          <div className="comparison-error">
+            <CircleAlert /> {error}
+          </div>
+        )}
+      </section>
+
+      <section className="comparison-stage">
+        <ComparisonLane
+          engine="lakebase"
+          title="Lakebase"
+          scenario={lakebaseScenario}
+          details={lakebase}
+          active={phase === 'lakebase'}
+        />
+        <ComparisonLane
+          engine="dbsql"
+          title="DBSQL"
+          scenario={dbsqlScenario}
+          details={dbsql}
+          active={phase === 'dbsql'}
+        />
+      </section>
+
+      <ComparisonScorecard preset={preset} lakebase={lakebase} dbsql={dbsql} />
+    </div>
+  );
+}
+
+function ComparisonLane({
+  engine,
+  title,
+  scenario,
+  details,
+  active,
+}: {
+  engine: 'lakebase' | 'dbsql';
+  title: string;
+  scenario?: Scenario;
+  details: RunDetails | null;
+  active: boolean;
+}) {
+  const run = details?.run;
+  const metrics = details?.metrics ?? [];
+  const latest = metrics.at(-1);
+  const elapsed = Math.max(1, value(latest?.elapsed_seconds));
+  const completedOperations =
+    run && run.status === 'completed'
+      ? value(run.total_operations)
+      : metrics.reduce((sum, item) => sum + value(item.operations), 0);
+  const averageTps = completedOperations / elapsed;
+  const errorRate = run
+    ? (value(run.total_errors) / Math.max(1, value(run.total_operations) + value(run.total_errors))) * 100
+    : 0;
+  return (
+    <article className={`comparison-lane ${engine}`}>
+      <header>
+        <span className="comparison-engine-icon">{engine === 'lakebase' ? <Database /> : <Columns3 />}</span>
+        <div>
+          <span className="section-kicker">{title}</span>
+          <h2>{scenario?.name ?? 'Waiting for scenario'}</h2>
+          <p>{scenario?.method}</p>
+        </div>
+        <Badge variant="outline" className={`status-${run?.status ?? 'ready'}`}>
+          {active ? 'running' : (run?.status ?? 'ready')}
+        </Badge>
+      </header>
+      <div className="comparison-kpis">
+        <ComparisonKpi label="Average throughput" value={run ? averageTps.toFixed(1) : '—'} unit="ops/s" />
+        <ComparisonKpi label="P95 latency" value={run ? value(run.p95_ms).toFixed(0) : '—'} unit="ms" />
+        <ComparisonKpi label="P99 latency" value={run ? value(run.p99_ms).toFixed(0) : '—'} unit="ms" />
+        <ComparisonKpi label="Error rate" value={run ? errorRate.toFixed(2) : '—'} unit="%" />
+      </div>
+      <div className="comparison-charts">
+        <LiveChart
+          live={active}
+          title={`${title} throughput`}
+          subtitle="Completed operations in each one-second interval"
+          metrics={metrics}
+          series={[{ key: 'operations', label: 'operations', tone: engine === 'lakebase' ? 'cyan' : 'indigo' }]}
+        />
+        <LiveChart
+          live={active}
+          title={`${title} latency`}
+          subtitle="Tail latency for the selected workload"
+          metrics={metrics}
+          unit="ms"
+          series={[
+            { key: 'p50_ms', label: 'p50', tone: 'cyan' },
+            { key: 'p95_ms', label: 'p95', tone: 'indigo' },
+            { key: 'p99_ms', label: 'p99', tone: 'red' },
+          ]}
+        />
+      </div>
+      {run && (
+        <footer>
+          <span>{run.concurrency} clients</span>
+          <span>{run.duration_seconds}s configured</span>
+          <span>{compact(value(run.total_operations))} operations</span>
+        </footer>
+      )}
+    </article>
+  );
+}
+
+function ComparisonKpi({ label, value: displayValue, unit }: { label: string; value: string; unit: string }) {
+  return (
+    <div>
+      <span>{label}</span>
+      <strong>
+        {displayValue}
+        <small>{unit}</small>
+      </strong>
+    </div>
+  );
+}
+
+function ComparisonScorecard({
+  preset,
+  lakebase,
+  dbsql,
+}: {
+  preset: ComparisonPreset;
+  lakebase: RunDetails | null;
+  dbsql: RunDetails | null;
+}) {
+  const left = lakebase?.run;
+  const right = dbsql?.run;
+  const observation = comparisonObservation(preset, left, right);
+  return (
+    <section className="comparison-scorecard surface">
+      <div className="section-heading">
+        <div>
+          <span className="section-kicker">Measured result</span>
+          <h2>Engine-fit evidence</h2>
+        </div>
+        <Badge variant="outline">conditions matter</Badge>
+      </div>
+      <div className="comparison-table" role="table" aria-label="Lakebase and DBSQL result comparison">
+        <div className="comparison-row comparison-head" role="row">
+          <span>Measure</span>
+          <span>Lakebase</span>
+          <span>DBSQL</span>
+        </div>
+        <ComparisonRow label="Average throughput" left={comparisonTps(lakebase)} right={comparisonTps(dbsql)} />
+        <ComparisonRow
+          label="P95 latency"
+          left={left ? `${value(left.p95_ms).toFixed(0)} ms` : '—'}
+          right={right ? `${value(right.p95_ms).toFixed(0)} ms` : '—'}
+        />
+        <ComparisonRow
+          label="P99 latency"
+          left={left ? `${value(left.p99_ms).toFixed(0)} ms` : '—'}
+          right={right ? `${value(right.p99_ms).toFixed(0)} ms` : '—'}
+        />
+        <ComparisonRow
+          label="Completed operations"
+          left={left ? compact(value(left.total_operations)) : '—'}
+          right={right ? compact(value(right.total_operations)) : '—'}
+        />
+      </div>
+      <div className="comparison-observation">
+        <Activity />
+        <div>
+          <strong>{observation.title}</strong>
+          <p>{observation.detail}</p>
+        </div>
+      </div>
+    </section>
+  );
+}
+
+function ComparisonRow({ label, left, right }: { label: string; left: string; right: string }) {
+  return (
+    <div className="comparison-row" role="row">
+      <span>{label}</span>
+      <strong>{left}</strong>
+      <strong>{right}</strong>
+    </div>
+  );
+}
+
+function comparisonTps(details: RunDetails | null) {
+  if (!details?.run) return '—';
+  const elapsed = Math.max(1, value(details.metrics.at(-1)?.elapsed_seconds) || details.run.duration_seconds);
+  return `${(value(details.run.total_operations) / elapsed).toFixed(1)} ops/s`;
+}
+
+function comparisonObservation(preset: ComparisonPreset, lakebase?: Run, dbsql?: Run) {
+  if (!lakebase || !dbsql) return { title: 'Run both engines to create evidence.', detail: preset.interpretation };
+  if (!preset.matched) return { title: 'Use each engine for its intended job.', detail: preset.interpretation };
+  const lakebaseP95 = Math.max(0.01, value(lakebase.p95_ms));
+  const dbsqlP95 = Math.max(0.01, value(dbsql.p95_ms));
+  const winner = lakebaseP95 <= dbsqlP95 ? 'Lakebase' : 'DBSQL';
+  const ratio = Math.max(lakebaseP95, dbsqlP95) / Math.min(lakebaseP95, dbsqlP95);
+  return {
+    title: `${winner} recorded ${ratio.toFixed(1)}× lower p95 in this run.`,
+    detail: `${preset.interpretation} This observation applies to the displayed data scale, compute sizes, cache state, and client settings.`,
+  };
+}
+
+async function fetchRunDetails(runId: string): Promise<RunDetails> {
+  const response = await fetch(`/api/lakeload/runs/${runId}`);
+  const body = (await response.json()) as { run?: Run; metrics?: Metric[]; error?: string };
+  if (!response.ok || !body.run) throw new Error(body.error ?? 'Run details could not load.');
+  return { run: body.run, metrics: (body.metrics ?? []).map(normalizeMetric) };
+}
+
+const pause = (milliseconds: number) => new Promise((resolve) => window.setTimeout(resolve, milliseconds));
 
 function BranchLab({
   overview,

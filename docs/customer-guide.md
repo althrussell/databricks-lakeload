@@ -10,6 +10,7 @@ LakeLoad is a repeatable Databricks App for demonstrating Lakebase OLTP, DBSQL O
 - One DBSQL warehouse binding for Delta setup and OLAP scenarios.
 - One executable DBSQL-versus-Lakebase notebook job.
 - A copy-on-write Branch Lab for live snapshots and isolated restore branches.
+- PostgreSQL tables in `lakeload_bench`: `account` (10,000 rows), `product` (1,000 rows), and `history` (5 million rows).
 - Delta tables in `<catalog>.lakeload`: `account` (1 million rows), `product` (10,000 rows), and `history` (5 million rows).
 
 No database password is stored. The App and jobs mint short-lived OAuth database credentials.
@@ -38,7 +39,7 @@ python scripts/bootstrap.py \
 
 The installer is idempotent. It creates or reuses the Lakebase project, benchmark branch, 1–4 CU endpoint, app, jobs, and resource grants. It prints the App URL when deployment succeeds.
 
-Open the App, select **Setup**, then select **Prepare all data**. The App service principal creates its PostgreSQL schemas and the `main.lakeload` Unity Catalog schema. This operation can take several minutes the first time because it creates five million deterministic Delta fact rows.
+Open the App, select **Setup**, then select **Prepare all data**. The App service principal creates its PostgreSQL schemas and the `main.lakeload` Unity Catalog schema. This operation can take several minutes the first time because it creates five million deterministic fact rows in both Lakebase and Delta.
 
 ### Why installation has a bootstrap command
 
@@ -220,6 +221,16 @@ LakeLoad does not provision an external collector.
 6. Report median throughput plus p50, p95, p99, errors, and freshness. Do not average p99 values across workers.
 7. Label cold-start and scale-to-zero measurements separately.
 8. Stop when the error guardrail is crossed. Saturation is a result, not a reason to keep increasing load.
+
+## Use the side-by-side engine comparison
+
+Open **Compare engines** in the navigation rail. Each preset applies one concurrency, duration, ramp, execution model, and warm-state policy to both lanes. LakeLoad runs the engines sequentially so one client workload does not interfere with the other, streams each lane at one-second resolution, then keeps both recorded timelines visible together.
+
+- **Indexed request serving** issues the same single-account lookup over the same 1–10,000 key range. Use throughput and p95/p99 to explain why Lakebase belongs on the synchronous OLTP request path.
+- **Five-million-row scan and join** makes both engines scan five million fact rows, join account and product dimensions, and aggregate by region and category. Use completed analytical queries and latency to explain DBSQL's OLAP execution fit.
+- **Transactions beside analytics** deliberately runs different workloads: mixed application traffic in Lakebase and a wide scan in DBSQL. It is an architecture demonstration, not a speed comparison.
+
+For a customer measurement, select a preset, set the shared controls, and choose **Run matched comparison**. Watch the running lane's throughput and latency charts; hover any point for the exact one-second values. When both lanes finish, use **Engine-fit evidence** for the side-by-side totals and measured interpretation. Repeat at least three times and record the compute sizes and cache state before quoting a result.
 
 ## Read the real-time console
 

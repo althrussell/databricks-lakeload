@@ -234,6 +234,7 @@ export async function setupLakeLoadRoutes(appkit: AppKitServices) {
     app.post('/api/lakeload/setup', async (req, res) => {
       try {
         await prepareLakebase(targetPool);
+        await prepareLakebaseAnalyticalHistory(targetPool);
         for (const statement of DBSQL_SETUP) await appkit.analytics.query(statement);
         const notebookPrincipal = actor(req);
         if (notebookPrincipal !== 'local-operator') {
@@ -351,11 +352,9 @@ export async function setupLakeLoadRoutes(appkit: AppKitServices) {
         return void res.status(409).json({ error: 'Another run is active' });
       const definition = scenarioById.get(parsed.data.scenario as ScenarioId)!;
       if (!definition.runnable)
-        return void res
-          .status(409)
-          .json({
-            error: `${definition.name} requires ${definition.prerequisite} setup. Use the readiness instructions first.`,
-          });
+        return void res.status(409).json({
+          error: `${definition.name} requires ${definition.prerequisite} setup. Use the readiness instructions first.`,
+        });
       try {
         const config = parsed.data;
         const created = await appkit.lakebase.query(
@@ -564,6 +563,18 @@ async function prepareLakebase(target: Queryable) {
     SELECT id,(ARRAY['Compute','Storage','AI','Platform'])[1+(id%4)],'Product '||id,
     'Deterministic benchmark product '||id,5+(id%995) FROM generate_series(1,1000) id
     ON CONFLICT(id) DO UPDATE SET title=EXCLUDED.title,description=EXCLUDED.description`);
+}
+
+async function prepareLakebaseAnalyticalHistory(target: Queryable) {
+  await target.query(`INSERT INTO lakeload_bench.history(id,account_id,counterparty_id,amount,created_at)
+    SELECT id,1+MOD(id::bigint*7919,10000),1+MOD(id::bigint*104729,10000),
+           ((MOD(id,20001)-10000)/100.0)::numeric(10,2),
+           NOW()-(MOD(id::bigint,2592000) * INTERVAL '1 second')
+    FROM generate_series(1,5000000) id
+    ON CONFLICT(id) DO NOTHING`);
+  await target.query(`SELECT setval(pg_get_serial_sequence('lakeload_bench.history','id'),
+    GREATEST((SELECT COALESCE(MAX(id),1) FROM lakeload_bench.history),1),true)`);
+  await target.query('ANALYZE lakeload_bench.history');
 }
 
 async function getReadiness(target: Queryable, analytics: AppKitServices['analytics']) {

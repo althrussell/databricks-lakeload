@@ -5,6 +5,7 @@ export type ScenarioId =
   | 'lakebase-transfer'
   | 'lakebase-mixed'
   | 'lakebase-operational-join'
+  | 'lakebase-olap-scan'
   | 'dbsql-point-lookup'
   | 'dbsql-olap-scan'
   | 'dbsql-window-analysis'
@@ -85,13 +86,28 @@ export const SCENARIOS: ScenarioDefinition[] = [
     tags: ['join', 'bounded', 'operational'],
   },
   {
+    id: 'lakebase-olap-scan',
+    name: 'PostgreSQL analytical scan',
+    engine: 'lakebase',
+    category: 'OLAP',
+    question: 'How does an operational database behave when asked to scan and aggregate five million events?',
+    method: 'Scan five million PostgreSQL history rows, join account and product dimensions, then aggregate.',
+    expected:
+      'Lakebase can execute the query, but wide scans compete with operational compute and are not its primary serving path.',
+    runnable: true,
+    defaultConcurrency: 1,
+    defaultDurationSeconds: 30,
+    tags: ['scan', 'five-million', 'comparison'],
+  },
+  {
     id: 'dbsql-point-lookup',
     name: 'Delta point lookup',
     engine: 'dbsql',
     category: 'OLAP',
     question: 'What is the cost of using an analytical engine for individual application lookups?',
     method: 'Issue parameterized single-account filters against the equivalent Delta table.',
-    expected: 'DBSQL can answer the query, but its scheduling model is designed for analytics rather than request serving.',
+    expected:
+      'DBSQL can answer the query, but its scheduling model is designed for analytics rather than request serving.',
     runnable: true,
     defaultConcurrency: 4,
     defaultDurationSeconds: 30,

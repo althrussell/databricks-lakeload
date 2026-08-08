@@ -6,7 +6,7 @@ Conditions:
 
 - Lakebase Autoscaling PostgreSQL 17.10, benchmark primary endpoint, 1–4 CU.
 - DBSQL Pro serverless X-Small warehouse, one cluster.
-- Lakebase operational data: 10,000 accounts and 1,000 products plus generated transfer history.
+- Lakebase data: 10,000 accounts, 1,000 products, and 5,000,000 deterministic history rows.
 - Delta analytical data: 1,000,000 accounts, 10,000 products, and 5,000,000 history rows.
 - Seed: `424242`.
 - Warm state after setup.
@@ -25,6 +25,19 @@ Conditions:
 
 The DBSQL tests report queries per second, not rows processed per second. Their purpose is to show that DBSQL completes large analytical work while Lakebase remains available for transactions. The point-lookup pair shows why DBSQL warehouse execution should not be used as an application request path.
 
+## Deployed side-by-side comparison results
+
+These paired runs used the **Compare engines** UI with shared controls and sequential execution. Each row is one 10-second functional run per engine in warm state.
+
+| Matched workload | Engine | Clients | Operations | Approx. ops/s | p50 | p95 | p99 | Errors |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| Indexed lookup, key range 1–10,000 | Lakebase | 10 | 20,613 | 2,061.3 | 5 ms | 8 ms | 13 ms | 0 |
+| Indexed lookup, key range 1–10,000 | DBSQL | 10 | 50 | 5.0 | 1,597 ms | 4,181 ms | 6,765 ms | 0 |
+| Five-million-row scan with two dimension joins | Lakebase | 1 | 1 | 0.1 | 30,000 ms* | 30,000 ms* | 30,000 ms* | 0 |
+| Five-million-row scan with two dimension joins | DBSQL | 1 | 17 | 1.7 | 610 ms | 2,584 ms | 2,584 ms | 0 |
+
+The matched point lookup demonstrates Lakebase's OLTP fit under concurrent request pressure. The matched scan demonstrates DBSQL's OLAP fit: it completed repeated five-million-row analytical queries while the PostgreSQL lane completed one. `*` LakeLoad's current histogram ceiling is 30 seconds, so the Lakebase scan values are capped rather than exact beyond that boundary. These are environment-specific observations, not universal performance claims.
+
 ## Concurrency and arrival-model checks
 
 | Scenario               | Model  |                     Users / target | Operations | Approx. ops/s |   p95 |   p99 | Errors |
@@ -42,6 +55,7 @@ The open-loop smoke reached 99.96% of the requested 500 operations per second wi
 - Negative account count: `0`.
 - Comparison notebook job run `886838542352178`: succeeded.
 - Remote Playwright smoke: passed in Chromium.
+- Side-by-side OLTP and OLAP acceptance: both engine lanes completed, result scorecards populated, and all comparison charts exposed pointer inspection.
 - Responsive check: no document-level horizontal overflow at 1,440 px or 375 px.
 - DM Sans and DM Mono: self-hosted files loaded successfully.
 
