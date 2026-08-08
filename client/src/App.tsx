@@ -24,7 +24,9 @@ import {
   Settings2,
   ShieldCheck,
   Square,
+  Target,
   Trash2,
+  Trophy,
   Waves,
   Zap,
 } from 'lucide-react';
@@ -1240,6 +1242,8 @@ function ComparisonView({ overview, onOpenSetup }: { overview: Overview; onOpenS
         )}
       </section>
 
+      <ComparisonScorecard preset={preset} lakebase={lakebase} dbsql={dbsql} />
+
       <section className="comparison-stage">
         <ComparisonLane
           engine="lakebase"
@@ -1256,8 +1260,6 @@ function ComparisonView({ overview, onOpenSetup }: { overview: Overview; onOpenS
           active={phase === 'dbsql'}
         />
       </section>
-
-      <ComparisonScorecard preset={preset} lakebase={lakebase} dbsql={dbsql} />
     </div>
   );
 }
@@ -1391,94 +1393,294 @@ function ComparisonScorecard({
 }) {
   const left = lakebase?.run;
   const right = dbsql?.run;
-  const observation = comparisonObservation(preset, left, right);
+  const leftRate = comparisonRate(lakebase);
+  const rightRate = comparisonRate(dbsql);
+  const leftError = left ? runErrorRate(left) : null;
+  const rightError = right ? runErrorRate(right) : null;
+  const leftGuardrails = comparisonGuardrails(preset, 'lakebase');
+  const rightGuardrails = comparisonGuardrails(preset, 'dbsql');
+  const verdict = comparisonVerdict(preset, lakebase, dbsql);
   return (
     <section className="comparison-scorecard surface">
       <div className="section-heading">
         <div>
-          <span className="section-kicker">Measured result</span>
-          <h2>Engine-fit evidence</h2>
+          <span className="section-kicker">Decision</span>
+          <h2>Winner and score</h2>
         </div>
-        <Badge variant="outline">conditions matter</Badge>
+        <div className="badge-with-help">
+          <Badge variant="outline">workload-specific scoring</Badge>
+          <HelpTip
+            label="How LakeLoad scores a run"
+            description="For matched workloads, p95 latency is the primary signal, error rate is a guardrail, and throughput breaks close results. Best-fit workloads use separate OLTP and OLAP targets."
+          />
+        </div>
+      </div>
+      <div className={`comparison-verdict ${verdict.tone}`} role="status" aria-live="polite">
+        <span className="verdict-icon">{verdict.tone === 'winner' ? <Trophy /> : <Target />}</span>
+        <div>
+          <span className="section-kicker">{verdict.eyebrow}</span>
+          <h3>{verdict.title}</h3>
+          <p>{verdict.detail}</p>
+          <div className="verdict-facts">
+            {verdict.facts.map((fact) => (
+              <span key={fact}>{fact}</span>
+            ))}
+          </div>
+        </div>
+      </div>
+      <div className="score-guide">
+        <div>
+          <strong>How to read the ratings</strong>
+          <p>Ratings use the selected workload and visible guardrails—not an industry-wide average.</p>
+        </div>
+        <span className="result-rating stretch">Stretch goal</span>
+        <span className="result-rating target">Within target</span>
+        <span className="result-rating attention">Outside target</span>
       </div>
       <div className="comparison-table" role="table" aria-label="Lakebase and DBSQL result comparison">
         <div className="comparison-row comparison-head" role="row">
           <span>Measure</span>
           <span>Lakebase</span>
           <span>DBSQL</span>
+          <span>Guardrail</span>
         </div>
         <ComparisonRow
           label="Average throughput"
           left={comparisonTps(lakebase)}
           right={comparisonTps(dbsql)}
           description={HELP.averageThroughput}
+          leftRating={relativeRating(leftRate, rightRate)}
+          rightRating={relativeRating(rightRate, leftRate)}
+          guardrail="A 10% lead is material"
         />
         <ComparisonRow
           label="P95 latency"
           left={left ? `${value(left.p95_ms).toFixed(0)} ms` : '—'}
           right={right ? `${value(right.p95_ms).toFixed(0)} ms` : '—'}
           description={HELP.p95}
+          leftRating={latencyRating(left?.p95_ms, leftGuardrails.p95Stretch, leftGuardrails.p95Target)}
+          rightRating={latencyRating(right?.p95_ms, rightGuardrails.p95Stretch, rightGuardrails.p95Target)}
+          guardrail={guardrailLabel(preset, 'p95')}
         />
         <ComparisonRow
           label="P99 latency"
           left={left ? `${value(left.p99_ms).toFixed(0)} ms` : '—'}
           right={right ? `${value(right.p99_ms).toFixed(0)} ms` : '—'}
           description={HELP.p99}
+          leftRating={latencyRating(left?.p99_ms, leftGuardrails.p99Stretch, leftGuardrails.p99Target)}
+          rightRating={latencyRating(right?.p99_ms, rightGuardrails.p99Stretch, rightGuardrails.p99Target)}
+          guardrail={guardrailLabel(preset, 'p99')}
+        />
+        <ComparisonRow
+          label="Error rate"
+          left={leftError === null ? '—' : `${leftError.toFixed(2)}%`}
+          right={rightError === null ? '—' : `${rightError.toFixed(2)}%`}
+          description={HELP.errorRate}
+          leftRating={errorRating(leftError)}
+          rightRating={errorRating(rightError)}
+          guardrail="Stretch ≤0.1% · target <1%"
         />
         <ComparisonRow
           label="Completed operations"
           left={left ? compact(value(left.total_operations)) : '—'}
           right={right ? compact(value(right.total_operations)) : '—'}
           description={HELP.completedOperations}
+          leftRating={relativeRating(left ? value(left.total_operations) : null, right ? value(right.total_operations) : null)}
+          rightRating={relativeRating(right ? value(right.total_operations) : null, left ? value(left.total_operations) : null)}
+          guardrail="Higher at equal duration"
         />
-      </div>
-      <div className="comparison-observation">
-        <Activity />
-        <div>
-          <strong>{observation.title}</strong>
-          <p>{observation.detail}</p>
-        </div>
       </div>
     </section>
   );
 }
+
+type RatingTone = 'stretch' | 'target' | 'attention' | 'lead' | 'trail' | 'neutral';
+type ResultRating = { label: string; tone: RatingTone };
+type ComparisonGuardrails = {
+  p95Stretch: number;
+  p95Target: number;
+  p99Stretch: number;
+  p99Target: number;
+};
 
 function ComparisonRow({
   label,
   left,
   right,
   description,
+  leftRating,
+  rightRating,
+  guardrail,
 }: {
   label: string;
   left: string;
   right: string;
   description: string;
+  leftRating: ResultRating;
+  rightRating: ResultRating;
+  guardrail: string;
 }) {
   return (
     <div className="comparison-row" role="row">
       <HelpLabel label={label} description={description} />
-      <strong>{left}</strong>
-      <strong>{right}</strong>
+      <ComparisonResult value={left} rating={leftRating} />
+      <ComparisonResult value={right} rating={rightRating} />
+      <small className="comparison-guardrail">{guardrail}</small>
     </div>
   );
 }
 
-function comparisonTps(details: RunDetails | null) {
-  if (!details?.run) return '—';
-  const elapsed = Math.max(1, value(details.metrics.at(-1)?.elapsed_seconds) || details.run.duration_seconds);
-  return `${(value(details.run.total_operations) / elapsed).toFixed(1)} ops/s`;
+function ComparisonResult({ value: displayValue, rating }: { value: string; rating: ResultRating }) {
+  return (
+    <span className="comparison-result">
+      <strong>{displayValue}</strong>
+      <em className={`result-rating ${rating.tone}`}>{rating.label}</em>
+    </span>
+  );
 }
 
-function comparisonObservation(preset: ComparisonPreset, lakebase?: Run, dbsql?: Run) {
-  if (!lakebase || !dbsql) return { title: 'Run both engines to create evidence.', detail: preset.interpretation };
-  if (!preset.matched) return { title: 'Use each engine for its intended job.', detail: preset.interpretation };
-  const lakebaseP95 = Math.max(0.01, value(lakebase.p95_ms));
-  const dbsqlP95 = Math.max(0.01, value(dbsql.p95_ms));
-  const winner = lakebaseP95 <= dbsqlP95 ? 'Lakebase' : 'DBSQL';
-  const ratio = Math.max(lakebaseP95, dbsqlP95) / Math.min(lakebaseP95, dbsqlP95);
+function comparisonTps(details: RunDetails | null) {
+  const rate = comparisonRate(details);
+  return rate === null ? '—' : `${rate.toFixed(1)} ops/s`;
+}
+
+function comparisonRate(details: RunDetails | null) {
+  if (!details?.run) return null;
+  const elapsed = Math.max(1, value(details.metrics.at(-1)?.elapsed_seconds) || details.run.duration_seconds);
+  return value(details.run.total_operations) / elapsed;
+}
+
+function runErrorRate(run: Run) {
+  return (value(run.total_errors) / Math.max(1, value(run.total_operations) + value(run.total_errors))) * 100;
+}
+
+function comparisonGuardrails(preset: ComparisonPreset, engine: 'lakebase' | 'dbsql'): ComparisonGuardrails {
+  const analytical = preset.id === 'olap' || (preset.id === 'best-fit' && engine === 'dbsql');
+  return analytical
+    ? { p95Stretch: 5_000, p95Target: 15_000, p99Stretch: 10_000, p99Target: 30_000 }
+    : { p95Stretch: 50, p95Target: 100, p99Stretch: 100, p99Target: 250 };
+}
+
+function latencyRating(
+  input: number | null | undefined,
+  stretchThreshold: number,
+  targetThreshold: number
+): ResultRating {
+  if (input === null || input === undefined) return { label: 'No result', tone: 'neutral' };
+  const measured = value(input);
+  if (measured <= stretchThreshold) return { label: 'Stretch goal', tone: 'stretch' };
+  if (measured <= targetThreshold) return { label: 'Within target', tone: 'target' };
+  return { label: 'Outside target', tone: 'attention' };
+}
+
+function errorRating(input: number | null): ResultRating {
+  if (input === null) return { label: 'No result', tone: 'neutral' };
+  if (input <= 0.1) return { label: 'Stretch goal', tone: 'stretch' };
+  if (input < 1) return { label: 'Within target', tone: 'target' };
+  return { label: 'Outside target', tone: 'attention' };
+}
+
+function relativeRating(input: number | null, other: number | null): ResultRating {
+  if (input === null || other === null) return { label: 'No result', tone: 'neutral' };
+  if (input >= other * 1.1) return { label: 'Leads', tone: 'lead' };
+  if (other >= input * 1.1) return { label: 'Trails', tone: 'trail' };
+  return { label: 'Comparable', tone: 'neutral' };
+}
+
+function guardrailLabel(preset: ComparisonPreset, percentile: 'p95' | 'p99') {
+  const lakebase = comparisonGuardrails(preset, 'lakebase');
+  const dbsql = comparisonGuardrails(preset, 'dbsql');
+  const lakebaseStretch = percentile === 'p95' ? lakebase.p95Stretch : lakebase.p99Stretch;
+  const lakebaseTarget = percentile === 'p95' ? lakebase.p95Target : lakebase.p99Target;
+  const dbsqlTarget = percentile === 'p95' ? dbsql.p95Target : dbsql.p99Target;
+  if (lakebaseTarget === dbsqlTarget)
+    return `Stretch ≤${formatMilliseconds(lakebaseStretch)} · target ≤${formatMilliseconds(lakebaseTarget)}`;
+  return `Lakebase ≤${formatMilliseconds(lakebaseTarget)} · DBSQL ≤${formatMilliseconds(dbsqlTarget)}`;
+}
+
+function formatMilliseconds(milliseconds: number) {
+  return milliseconds >= 1_000 ? `${milliseconds / 1_000}s` : `${milliseconds}ms`;
+}
+
+function comparisonVerdict(preset: ComparisonPreset, lakebase: RunDetails | null, dbsql: RunDetails | null) {
+  const left = lakebase?.run;
+  const right = dbsql?.run;
+  if (!left || !right) {
+    if (!preset.matched) {
+      return {
+        tone: 'pending',
+        eyebrow: 'Awaiting both results',
+        title: 'Run both workloads to evaluate engine fit',
+        detail: 'Lakebase will be rated against an operational latency target and DBSQL against an analytical latency target.',
+        facts: ['Lakebase: OLTP target', 'DBSQL: OLAP target', 'Error ceiling: <1%'],
+      };
+    }
+    return {
+      tone: 'pending',
+      eyebrow: 'Awaiting both results',
+      title: 'Run both engines to select a winner',
+      detail: 'LakeLoad will score p95 latency first, apply the error ceiling, then use throughput for close results.',
+      facts: ['Primary: p95 latency', 'Error ceiling: <1%', 'Tiebreaker: throughput'],
+    };
+  }
+
+  const leftRate = comparisonRate(lakebase) ?? 0;
+  const rightRate = comparisonRate(dbsql) ?? 0;
+  const leftError = runErrorRate(left);
+  const rightError = runErrorRate(right);
+  const leftP95 = Math.max(0.01, value(left.p95_ms));
+  const rightP95 = Math.max(0.01, value(right.p95_ms));
+
+  if (!preset.matched) {
+    const leftRating = latencyRating(
+      leftP95,
+      comparisonGuardrails(preset, 'lakebase').p95Stretch,
+      comparisonGuardrails(preset, 'lakebase').p95Target
+    );
+    const rightRating = latencyRating(
+      rightP95,
+      comparisonGuardrails(preset, 'dbsql').p95Stretch,
+      comparisonGuardrails(preset, 'dbsql').p95Target
+    );
+    return {
+      tone: 'split',
+      eyebrow: 'Split decision',
+      title: 'No single winner for different jobs',
+      detail: 'Use Lakebase for the operational request path and DBSQL for the analytical scan. Each result uses its own latency target.',
+      facts: [
+        `Lakebase OLTP: ${leftRating.label}`,
+        `DBSQL OLAP: ${rightRating.label}`,
+        `Errors: ${leftError.toFixed(2)}% / ${rightError.toFixed(2)}%`,
+      ],
+    };
+  }
+
+  let winner: 'Lakebase' | 'DBSQL' | 'Near tie';
+  if (leftError < 1 && rightError >= 1) winner = 'Lakebase';
+  else if (rightError < 1 && leftError >= 1) winner = 'DBSQL';
+  else if (leftP95 <= rightP95 / 1.1) winner = 'Lakebase';
+  else if (rightP95 <= leftP95 / 1.1) winner = 'DBSQL';
+  else if (leftRate >= rightRate * 1.1) winner = 'Lakebase';
+  else if (rightRate >= leftRate * 1.1) winner = 'DBSQL';
+  else winner = 'Near tie';
+
+  const lowerLatencyEngine = leftP95 <= rightP95 ? 'Lakebase' : 'DBSQL';
+  const latencyRatio = Math.max(leftP95, rightP95) / Math.min(leftP95, rightP95);
+  const higherRateEngine = leftRate >= rightRate ? 'Lakebase' : 'DBSQL';
+  const rateRatio = Math.max(leftRate, rightRate) / Math.max(0.01, Math.min(leftRate, rightRate));
   return {
-    title: `${winner} recorded ${ratio.toFixed(1)}× lower p95 in this run.`,
-    detail: `${preset.interpretation} This observation applies to the displayed data scale, compute sizes, cache state, and client settings.`,
+    tone: winner === 'Near tie' ? 'tie' : 'winner',
+    eyebrow: winner === 'Near tie' ? 'Result' : 'Winner',
+    title: winner === 'Near tie' ? 'Near tie: results are within 10%' : `${winner} wins: ${preset.title}`,
+    detail:
+      winner === 'Near tie'
+        ? 'Neither engine leads by 10% on the decision metrics. Repeat the test or increase load before drawing a conclusion.'
+        : `${winner} leads on the scored result. This decision applies to the displayed data, compute, cache state, and client settings.`,
+    facts: [
+      `P95: ${lowerLatencyEngine} ${latencyRatio.toFixed(1)}× lower`,
+      `Throughput: ${higherRateEngine} ${rateRatio.toFixed(1)}× higher`,
+      `Errors: ${leftError.toFixed(2)}% / ${rightError.toFixed(2)}%`,
+    ],
   };
 }
 

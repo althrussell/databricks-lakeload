@@ -34,8 +34,17 @@ test('LakeLoad renders the workload console', async ({ page }) => {
   await page.getByRole('button', { name: 'Compare engines', exact: true }).click();
   await expect(page.getByRole('heading', { name: 'Lakebase and DBSQL, side by side', exact: true })).toBeVisible();
   await expect(page.getByRole('button', { name: /Indexed request serving/ })).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Winner and score', exact: true })).toBeVisible();
+  await expect(page.locator('.comparison-verdict')).toContainText(/wins|Near tie|No single winner|select a winner/);
+  await expect(page.getByText('Ratings use the selected workload and visible guardrails', { exact: false })).toBeVisible();
+  await expect(page.getByText('Stretch goal', { exact: true }).first()).toBeVisible();
+  await expect(page.getByText('Within target', { exact: true }).first()).toBeVisible();
+  await expect(page.getByText('Outside target', { exact: true }).first()).toBeVisible();
+  await expect(page.getByText('Guardrail', { exact: true })).toBeVisible();
   await expect(page.locator('.comparison-lane.lakebase')).toContainText('Lakebase');
   await expect(page.locator('.comparison-lane.dbsql')).toContainText('DBSQL');
+  await page.getByRole('button', { name: /Transactions beside analytics/ }).click();
+  await expect(page.locator('.comparison-verdict')).toContainText(/No single winner|evaluate engine fit/);
   await page.getByRole('button', { name: 'Settings', exact: true }).click();
   await expect(page.getByRole('heading', { name: 'Prepare benchmark datasets', exact: true })).toBeVisible();
   await expect(page.getByLabel('Preparation details').getByText('Lakebase PostgreSQL', { exact: true })).toBeVisible();
