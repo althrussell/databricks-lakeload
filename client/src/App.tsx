@@ -1800,11 +1800,17 @@ function DataDestinationSettings({
       </div>
       <div className="destination-note">
         <ShieldCheck />
-        <span>
-          LakeLoad creates only <code>lakeload_account</code>, <code>lakeload_product</code>, and{' '}
-          <code>lakeload_history</code>.
-          <small>Hard Reset removes only these tables. Other objects in an existing schema remain unchanged.</small>
-        </span>
+        <div className="destination-note-copy">
+          <strong>
+            Tables created in <code>{catalog}.{schema}</code>
+          </strong>
+          <div className="destination-table-list" aria-label="LakeLoad Delta tables">
+            <code>lakeload_account</code>
+            <code>lakeload_product</code>
+            <code>lakeload_history</code>
+          </div>
+          <small>Hard Reset drops these three tables. It keeps the catalog, schema, and every other object.</small>
+        </div>
       </div>
       {message && <div className={`warehouse-message ${message.kind}`}>{message.text}</div>}
     </div>

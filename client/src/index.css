@@ -1463,7 +1463,7 @@ h3 {
 }
 .data-destination-settings > *,
 .destination-heading > div,
-.destination-note span {
+.destination-note-copy {
   min-width: 0;
 }
 .destination-heading {
@@ -1539,8 +1539,8 @@ h3 {
 .destination-note {
   grid-column: 1 / -1;
   display: flex;
-  align-items: center;
-  gap: var(--db-space-2);
+  align-items: flex-start;
+  gap: var(--db-space-3);
   padding-top: var(--db-space-3);
   border-top: 0.0625rem solid rgb(120 148 154 / 14%);
   color: var(--db-text-muted);
@@ -1548,18 +1548,33 @@ h3 {
 }
 .destination-note > svg {
   width: 1rem;
+  margin-top: 0.15rem;
   flex: 0 0 auto;
   color: var(--db-success);
 }
-.destination-note span {
+.destination-note-copy {
   display: grid;
-  gap: var(--db-space-1);
+  gap: var(--db-space-2);
 }
-.destination-note code {
+.destination-note-copy strong {
+  color: var(--db-text);
+  font-size: 0.8rem;
+}
+.destination-table-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--db-space-2);
+}
+.destination-table-list code {
+  padding: 0.2rem var(--db-space-2);
+  border: 0.0625rem solid rgb(120 148 154 / 20%);
+  border-radius: var(--db-radius-sm);
+  background: rgb(4 20 25 / 40%);
   color: var(--db-ink-200);
 }
 .destination-note small {
   color: var(--db-text-subtle);
+  line-height: 1.45;
 }
 .warehouse-settings {
   display: grid;

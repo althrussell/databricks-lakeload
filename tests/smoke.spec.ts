@@ -47,6 +47,9 @@ test('LakeLoad renders the workload console', async ({ page }) => {
   await expect(page.getByLabel('Benchmark catalog')).toBeVisible();
   await expect(page.getByLabel('Benchmark schema')).toBeVisible();
   await expect(page.getByRole('button', { name: 'Validate and save destination', exact: true })).toBeVisible();
+  await expect(page.getByText('Tables created in main.lakeload', { exact: true })).toBeVisible();
+  await expect(page.getByLabel('LakeLoad Delta tables')).toContainText('lakeload_account');
+  await expect(page.getByText('It keeps the catalog, schema, and every other object.', { exact: false })).toBeVisible();
   await expect(page.getByRole('heading', { name: 'SQL warehouse under test', exact: true })).toBeVisible();
   await expect(page.getByRole('combobox', { name: 'SQL warehouse' })).toBeVisible();
   const selectedWarehouse = page.getByRole('button', { name: 'Selected for DBSQL tests', exact: true });
