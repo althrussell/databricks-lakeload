@@ -72,3 +72,21 @@ test('mobile console has no document overflow', async ({ page }, testInfo) => {
   expect(fonts.mono).toContain('DM Mono');
   await page.screenshot({ path: testInfo.outputPath('mobile-375.png'), fullPage: true });
 });
+
+test('wide console is centered within the space beside the navigation rail', async ({ page }, testInfo) => {
+  test.skip(remoteOnly, 'deployed layout acceptance test');
+  await page.setViewportSize({ width: 2476, height: 1281 });
+  await page.goto('/');
+  await expect(page.getByRole('heading', { name: 'Shape the pressure' })).toBeVisible();
+  const geometry = await page.evaluate(() => {
+    const workspace = document.querySelector('.workspace')?.getBoundingClientRect();
+    const rail = document.querySelector('.side-rail')?.getBoundingClientRect();
+    if (!workspace || !rail) throw new Error('App shell was not rendered');
+    return {
+      leftGutter: workspace.left - rail.width,
+      rightGutter: window.innerWidth - workspace.right,
+    };
+  });
+  expect(Math.abs(geometry.leftGutter - geometry.rightGutter)).toBeLessThanOrEqual(1);
+  await page.screenshot({ path: testInfo.outputPath('wide-centered-2476.png'), fullPage: true });
+});
