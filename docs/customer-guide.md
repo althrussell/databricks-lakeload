@@ -2,6 +2,8 @@
 
 LakeLoad is a repeatable Databricks App for demonstrating Lakebase OLTP, DBSQL OLAP, and bidirectional LTAP. It creates deterministic operational and Delta datasets, runs measured workloads, and keeps engine guidance beside each result.
 
+For a shorter first-run path, use the [quickstart](quickstart.md). For screenshot-led instructions across every App surface, use the [user guide](user-guide.md). This document is the detailed deployment, preview configuration, methodology, and automation reference.
+
 ## What gets installed
 
 - One Lakebase Autoscaling project with a protected-style `production` control branch and an isolated `benchmark` branch.
